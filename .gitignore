@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.ipynb_checkpoints/
+
+# Data / results / logs
+data/
+results/
+logs/
+*.log
+*.csv
+*.json
+*.jsonl
+*.jsonls
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.zip
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.env
+.venv/
