@@ -32,8 +32,6 @@ python executable/launcher.py \
     --output results/my_run
 ```
 
-See [QUICK_START_COMMANDS.md](docs/guides/QUICK_START_COMMANDS.md) for more examples.
-
 ## How it works
 
 ### Pipeline stages
@@ -99,7 +97,6 @@ config/
 
 scripts/                             # Quick runners for common tasks
 analysis/                            # Visualization and reporting tools
-docs/                                # Detailed guides and API docs
 ```
 
 Files are organized by function: preprocessing → discovery → detection → classification → analysis.
@@ -159,8 +156,6 @@ python executable/launcher.py \
     --threshold-multiplier 3.0 \
     ...
 ```
-
-See [PROGRAM_DOCUMENTATION.md](docs/api/PROGRAM_DOCUMENTATION.md) for all parameters.
 
 ## Key parameters
 
@@ -294,9 +289,6 @@ See [METRICS_CLARIFICATION.md](METRICS_CLARIFICATION.md) for why we use 4 metric
 
 ## Documentation
 
-- [END_TO_END_GUIDE.md](docs/guides/END_TO_END_GUIDE.md): Complete walkthrough
-- [QUICK_START_COMMANDS.md](docs/guides/QUICK_START_COMMANDS.md): Copy-paste examples
-- [PROGRAM_DOCUMENTATION.md](docs/api/PROGRAM_DOCUMENTATION.md): Full API reference
 - [METRICS_CLARIFICATION.md](METRICS_CLARIFICATION.md): Why 4 metrics?
 
 ## Contributing
