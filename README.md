@@ -1,8 +1,16 @@
-# Telemanom Anomaly Detection via Causal Graph Changes
+# Temporal Anomaly Detection via Rolling Window Causal Graph Evolution
 
 Detects anomalies in multivariate time series by learning Dynamic Bayesian Networks (DBNs) and tracking structural changes in the causal graph. Uses DynoTEARS for causal discovery and a 4-metric ensemble for anomaly classification.
 
-This was developed for the Telemanom dataset (NASA spacecraft telemetry) but works on any multivariate time series where anomalies manifest as changes in causal structure.
+## Datasets
+
+This method has been validated on the following real-world benchmarks:
+
+- **NASA SMAP/MSL (Telemanom)**: Primary benchmark with multivariate telemetry data from two NASA missions. Contains expert-verified labels for anomalous periods from spacecraft operations.
+
+- **Server Machine Dataset (SMD)**: Public benchmark from a large internet company for IT operations monitoring, containing multi-dimensional KPIs from server machines.
+
+The approach generalizes to any multivariate time series where anomalies manifest as changes in causal structure.
 
 ## What this does
 
