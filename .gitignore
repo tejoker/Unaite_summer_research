@@ -1,0 +1,48 @@
+# Data and results directories (too large for GitHub)
+data/
+logs/
+results/
+!data/.gitkeep
+!logs/.gitkeep
+!results/.gitkeep
+
+# Large data files
+*.csv
+*.CSV
+*.log
+*.LOG
+*.pkl
+*.PKL
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+!.gitkeep
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+*.tmp
+*.temp

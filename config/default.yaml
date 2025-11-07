@@ -1,0 +1,259 @@
+# Paul Wurth Industrial Time Series Analysis - Default Configuration
+# Override these settings by creating config/local.yaml or setting environment variables
+
+# System Configuration
+system:
+  # Compute resources
+  gpu_enabled: true                    # Use GPU acceleration if available
+  num_workers: 4                       # Number of parallel workers
+  memory_limit_gb: 32                  # Memory limit in GB
+  temp_dir: "/tmp/paulwurth"          # Temporary directory for processing
+
+  # Logging
+  log_level: "INFO"                    # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/paulwurth.log"       # Log file path
+  log_rotation: "daily"                # daily, weekly, monthly
+  log_retention_days: 30               # Keep logs for N days
+
+# Data Configuration
+data:
+  # Paths (relative to project root)
+  base_path: "data"
+  golden_path: "data/Golden"
+  anomaly_path: "data/Anomaly"
+  test_path: "data/Test"
+  reconstruction_path: "data/Reconstruction"
+
+  # Processing
+  chunk_size: 10000                    # Rows per chunk for large files
+  max_file_size_mb: 1000              # Maximum file size to process
+  supported_formats: [".csv", ".parquet", ".feather"]
+
+  # Sensor configuration
+  sensor_columns:
+    temperature_sensors:
+      - "Temperatur Druckpfannenlager links"
+      - "Temperatur Druckpfannenlager rechts"
+      - "Temperatur Exzenterlager links"
+      - "Temperatur Exzenterlager rechts"
+      - "Temperatur Ständerlager links"
+      - "Temperatur Ständerlager rechts"
+
+    # Add more sensor types as needed
+    pressure_sensors: []
+    vibration_sensors: []
+    flow_sensors: []
+
+# Results Configuration
+results:
+  base_path: "results"
+  # Experiment organization
+  create_timestamp_folders: true
+  experiment_hierarchy: true
+
+  # File retention
+  auto_cleanup: false                  # Automatic cleanup of old results
+  retention_days: 90                   # Keep results for N days
+  max_total_size_gb: 50               # Maximum total results size
+
+  # Output formats
+  save_formats:
+    - "csv"                           # Always save CSV
+    - "pkl"                           # Pickle for Python objects
+    - "json"                          # JSON for metadata
+  save_plots: true                    # Generate and save plots
+  plot_format: "png"                  # png, pdf, svg
+
+# Preprocessing Configuration
+preprocessing:
+  # Stationarity testing
+  stationarity:
+    alpha: 0.05                       # Significance level for tests
+    test_methods: ["adf", "kpss"]     # Available: adf, kpss, pp
+    max_diff_order: 2                 # Maximum differencing order
+
+  # Lag optimization
+  lags:
+    method: "aic"                     # aic, bic, hqic
+    max_lags: 10                      # Maximum lags to test
+    auto_optimize: true               # Automatic lag selection
+
+  # Mutual information
+  mutual_information:
+    alpha: 0.01                       # Significance for dependency tests
+    bins: 5                           # Quantile bins for discretization
+    include_lag0: false               # Include contemporaneous relationships
+    force_self_lags: true             # Always allow self-lagged relationships
+
+  # Parallel processing
+  parallel:
+    enabled: true
+    max_workers: null                 # null = auto-detect CPU cores
+
+# DynoTears Algorithm Configuration
+dynotears:
+  # Core algorithm parameters
+  lambda_w: 0.1                       # Sparsity penalty for contemporaneous effects
+  lambda_a: 0.1                       # Sparsity penalty for lagged effects
+  max_iter: 100                       # Maximum optimization iterations
+  h_tol: 1.0e-8                       # Acyclicity constraint tolerance
+  loss_tol: 1.0e-6                    # Loss convergence tolerance
+
+  # Network architecture
+  hidden_layers: [10]                 # Hidden layer sizes
+  activation: "relu"                  # relu, tanh, sigmoid, leaky_relu
+  dropout_rate: 0.0                   # Dropout for regularization
+
+  # Optimization
+  optimizer: "adam"                   # adam, sgd, rmsprop
+  learning_rate: 0.001                # Initial learning rate
+  weight_decay: 0.0                   # L2 regularization
+
+  # Edge thresholding
+  w_threshold: 0.0                    # Threshold for edge pruning
+  adaptive_threshold: false           # Use adaptive thresholding
+
+  # Constraints
+  tabu_edges: []                      # Forbidden edges: [[from, to, lag], ...]
+  tabu_parent_nodes: []               # Nodes that cannot be parents
+  tabu_child_nodes: []                # Nodes that cannot be children
+
+  # Device configuration
+  device: "auto"                      # auto, cpu, cuda, cuda:0, etc.
+  dtype: "float32"                    # float32, float64
+
+  # Checkpointing
+  save_checkpoints: true              # Save intermediate results
+  checkpoint_interval: 10             # Save every N iterations
+  resume_from_checkpoint: false       # Resume from last checkpoint
+
+# Reconstruction Configuration
+reconstruction:
+  # Simulation parameters
+  steps: 100                          # Number of reconstruction steps
+  num_samples: 1                      # Number of sample trajectories
+
+  # Variables to reconstruct (empty = all)
+  target_variables: []
+
+  # Validation
+  validation_split: 0.2               # Fraction for validation
+  metrics: ["mse", "mae", "r2"]      # Reconstruction metrics
+
+  # Anomaly detection
+  anomaly_threshold: 2.0              # Standard deviations for anomaly detection
+  anomaly_method: "reconstruction_error"  # reconstruction_error, isolation_forest
+
+# Anomaly Injection Configuration (for testing)
+anomaly_injection:
+  # Available anomaly types
+  types:
+    spike:
+      default_magnitude: 50.0
+      default_duration: 1
+    level_shift:
+      default_magnitude: 20.0
+      default_duration: 50
+    trend:
+      default_slope: 1.0
+      default_duration: 100
+    noise:
+      default_std_multiplier: 5.0
+      default_duration: 20
+
+  # Output configuration
+  save_metadata: true                 # Save anomaly injection metadata
+  create_plots: true                  # Create before/after plots
+  random_seed: 42                     # Random seed for reproducibility
+
+# Experiment Management
+experiments:
+  # Naming
+  name_template: "EXPERIMENT_{type}_{dataset}_{version}_{timestamp}"
+  version: "1.0"
+
+  # Metadata tracking
+  track_git_info: true                # Include git commit info
+  track_system_info: true             # Include system information
+  track_parameters: true              # Include all parameters
+
+  # Comparison
+  enable_comparison: true             # Enable experiment comparison
+  comparison_metrics: ["mse", "runtime", "memory_usage"]
+
+# Pipeline Configuration
+pipeline:
+  # Default pipeline for final_pipeline folder
+  default_sequence:
+    - "preprocessing.py"
+    - "dbn_dynotears.py"
+    - "reconstruction.py"
+
+  # Pipeline-specific settings
+  timeout_minutes: 60                 # Timeout per pipeline step
+  continue_on_error: false            # Continue pipeline if step fails
+
+  # Resource management
+  memory_monitoring: true             # Monitor memory usage
+  cleanup_intermediate: false         # Clean up intermediate files
+
+# GPU Optimization Configuration
+gpu_optimization:
+  # Mixed precision training
+  use_mixed_precision: true           # Enable mixed precision (FP16/BF16)
+  mixed_precision_dtype: "float16"    # float16, bfloat16
+  loss_scale_init: 65536.0            # Initial loss scaling factor
+  loss_scale_growth_factor: 2.0       # Loss scale growth factor
+
+  # Memory management
+  memory_efficient: true              # Enable memory optimizations
+  memory_fraction: 0.8                # GPU memory fraction to use
+  enable_memory_pool: true            # Use GPU memory pooling
+  gradient_checkpointing: false       # Trade compute for memory
+
+  # Multi-GPU settings
+  use_data_parallel: true             # Enable DataParallel for multi-GPU
+  use_distributed: false              # Enable DistributedDataParallel
+  find_unused_parameters: true        # For DDP unused parameter detection
+
+  # CUDA streams and async operations
+  num_streams: 4                      # Number of CUDA streams
+  enable_async_loading: true          # Asynchronous data loading
+
+  # Performance optimizations
+  enable_cudnn_benchmark: true        # Enable cuDNN autotuner
+  enable_tensor_fusion: true          # Enable tensor operation fusion
+  compile_model: true                 # Use torch.compile (PyTorch 2.0+)
+
+  # Dynamic batch sizing
+  adaptive_batch_size: true           # Automatically adjust batch size
+  min_batch_size: 32                  # Minimum batch size
+  max_batch_size: 1024               # Maximum batch size
+  batch_size_growth_factor: 1.5       # Growth factor for batch size
+
+  # Kernel optimization
+  enable_kernel_optimization: true    # Enable custom CUDA kernels
+  use_flash_attention: false          # Use FlashAttention (if available)
+  optimize_matmul: true               # Optimize matrix multiplications
+
+# Advanced Configuration
+advanced:
+  # Performance tuning
+  torch_num_threads: null             # PyTorch thread count (null = auto)
+  numpy_num_threads: null             # NumPy thread count (null = auto)
+
+  # Numerical stability
+  numerical_precision: "float32"      # float32, float64
+  gradient_clipping: 1.0              # Gradient clipping threshold
+
+  # Debugging
+  debug_mode: false                   # Enable debug mode
+  profile_performance: false          # Enable performance profiling
+  save_intermediate_results: false    # Save all intermediate results
+
+  # GPU-specific advanced settings
+  gpu_advanced:
+    tensor_core_usage: true           # Use Tensor Cores when possible
+    cuda_graphs: false                # Use CUDA graphs (experimental)
+    jit_compile: true                 # JIT compile operations
+    persistent_workers: true          # Keep data loader workers alive

@@ -16,7 +16,7 @@ The approach generalizes to any multivariate time series where anomalies manifes
 
 Given a baseline period (normal behavior) and test windows:
 
-1. **Learn causal graphs** using DynoTEARS (a continuous optimization method for structure learning in DBNs)
+1. **Learn causal graphs** using DynoTEARS (a continuous optimization method for structure learning in DBNs with **linear structural equations**)
 2. **Compare graphs** between baseline and test windows across 4 metrics:
    - **SHD** (Structural Hamming Distance): counts edge differences
    - **Frobenius norm**: measures weight magnitude changes  
@@ -26,6 +26,7 @@ Given a baseline period (normal behavior) and test windows:
 4. **Classify type**: spike, drift, level shift, trend change, amplitude change
 5. **Root cause analysis**: identifies which variables/edges changed
 
+**Model assumption:** Linear DBN (validated R²=0.84 on Telemanom dataset). Works well for continuous sensor data with approximately linear dynamics. See [Model Validation](#model-validation-and-applicability) section b
 
 ## Quick start
 
@@ -45,9 +46,11 @@ python executable/launcher.py \
 ### Pipeline stages
 
 **1. Preprocessing** (`preprocessing_no_mi.py`)
-- Makes series stationary (ADF/KPSS tests, differencing if needed)
+- Makes series **stationary** (ADF/KPSS tests, differencing if needed) to remove trends/seasonality
+- **Standardizes** data (zero mean, unit variance) for numerical stability
 - Finds optimal lag structure via AutoReg AIC
 - No mutual information filtering (removed for simplicity)
+- **Note:** This ensures stationarity but does NOT linearize non-linear relationships
 
 **2. Causal discovery** (`dbn_dynotears.py`)
 - Learns DBN structure using DynoTEARS (Zheng et al. 2020)
@@ -288,12 +291,53 @@ Anomaly detection is based on comparing learned graphs, similar to change-point 
 
 See [METRICS_CLARIFICATION.md](METRICS_CLARIFICATION.md) for why we use 4 metrics and how they complement each other.
 
+## Model Validation and Applicability
+
+**Linear Model Assumption:** This method assumes linear causal relationships (DBN with linear structural equations). We validated this assumption on real industrial data:
+
+### Validation Results (November 2025)
+
+Testing on **NASA Telemanom dataset** (spacecraft telemetry):
+- **R² = 0.84** (mean), **0.93** (median) on continuous sensors
+- **73% of variables** show excellent linear fit (R² ≥ 0.9)
+- **Conclusion:** Linear DBN model is **appropriate** for Telemanom-like data
+
+**Data characteristics that work well:**
+- Continuous sensor measurements (temperature, pressure, flow rates, etc.)
+- Physical processes with approximately linear dynamics
+- Data after preprocessing (stationarity + standardization)
+
+**Important notes:**
+1. **Preprocessing makes data stationary, NOT linear**
+   - Differencing removes trends/drifts (ensures stationarity)
+   - Standardization normalizes scale (zero mean, unit variance)
+   - **But non-linear relationships remain non-linear** (e.g., quadratic effects, interactions)
+
+2. **Dataset dependency**
+   - Validation showed only **1.4% of industrial variables** were truly continuous (60% were constant, 38% discrete/binary)
+   - Linear model works well on continuous sensors but not on categorical/discrete variables
+   - Always check your data: if relationships are highly non-linear, consider non-linear causal discovery methods
+
+3. **Gaussian noise assumption**
+   - Validation revealed residuals are **not perfectly Gaussian** (heavy tails observed)
+   - Model still performs well (R²=0.84) but this is a known limitation
+   - Future work: robust noise models (Student-t, Laplace distributions)
+
+**Recommendation:** The linear DBN is a practical and efficient approximation that works well for datasets similar to Telemanom (multivariate sensor data with predominantly linear dynamics). For highly non-linear systems (e.g., complex neural/biological networks, chaotic systems), consider non-linear alternatives like neural causal models or kernel-based methods.
+
+See `LINEAR_MODEL_VALIDATION.md` for complete validation report including R² distributions, residual analysis, and diagnostic plots.
+
+---
+
 ## Limitations
 
 - Assumes anomalies manifest as causal structure changes (true for many system failures, but not all anomaly types)
+- **Linear model assumption:** Best suited for approximately linear dynamics (validated R²=0.84 on Telemanom)
+- **Not suitable for:** Highly non-linear systems, categorical/discrete variables, or data with <50 continuous sensors
 - Requires sufficient data in baseline to learn stable graph (~500+ timesteps recommended)
 - Detection thresholds are dataset-specific (tune on validation set)
 - Can't detect anomalies in single-variable series (need multivariate dependencies)
+- Gaussian noise assumption is approximate (residuals show some deviation from normality)
 
 ## Documentation
 

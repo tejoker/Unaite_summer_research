@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Preprocessing WITHOUT mutual information masking
-Only does: stationarity testing, differencing, and lag optimization
+Preprocessing Pipeline
+Performs: stationarity testing, differencing, and lag optimization
 """
 
 import os
@@ -94,7 +94,7 @@ def find_optimal_lag(series, max_lag=20, lb_lags=10, alpha=0.05):
 
 
 def main():
-    """Main preprocessing workflow - NO MI MASKING"""
+    """Main preprocessing workflow"""
 
     # Get input parameters from environment
     input_file = os.getenv('INPUT_CSV_FILE', 'cleaned_dataset.csv')
@@ -102,7 +102,7 @@ def main():
     provided_lags_file = os.getenv('INPUT_LAGS_CSV', None)  # Check if lags file is provided
 
     logger.info("="*80)
-    logger.info("PREPROCESSING - NO MI MASKING")
+    logger.info("PREPROCESSING PIPELINE")
     logger.info("="*80)
     logger.info(f"Input file: {input_file}")
     logger.info(f"Result directory: {result_dir}")
@@ -237,47 +237,13 @@ def main():
         lags_df.to_csv(lags_file, index=False)
         logger.info(f"Saved optimal lags to: {lags_file}")
 
-    # Step 4: Create EMPTY MI mask (all edges allowed)
-    logger.info("\nStep 4: Creating empty MI mask (NO MASKING)")
-    logger.info("-"*40)
-
-    var_names = df_diff.columns.tolist()
-    n_vars = len(var_names)
-    max_lag = int(lags_df['optimal_lag'].max())
-
-    logger.info(f"Variables: {n_vars}, Max lag: {max_lag}")
-    logger.info(f"Creating mask for {(max_lag + 1) * n_vars * n_vars} edges...")
-
-    # Create mask where ALL edges are allowed
-    mask_data = []
-    for lag in range(max_lag + 1):
-        for i, child in enumerate(var_names):
-            for j, parent in enumerate(var_names):
-                mask_data.append({
-                    'lag': lag,
-                    'child_idx': i,
-                    'parent_idx': j,
-                    'child_name': child,
-                    'parent_name': parent,
-                    'allowed': True  # All edges allowed = no masking
-                })
-
-    logger.info(f"Mask created, saving to file...")
-    mask_df = pd.DataFrame(mask_data)
-    mask_file = os.path.join(preproc_dir, f"{basename}_mi_mask_edges.csv")
-    mask_df.to_csv(mask_file, index=False)
-
-    logger.info(f"Created empty MI mask: {len(mask_df)} edges (ALL ALLOWED)")
-    logger.info(f"Saved to: {mask_file}")
-
     # Summary
     logger.info("\n" + "="*80)
-    logger.info("PREPROCESSING COMPLETE - NO MI MASKING APPLIED")
+    logger.info("PREPROCESSING COMPLETE")
     logger.info("="*80)
     logger.info(f"Output files in: {preproc_dir}")
     logger.info(f"  - Differenced data: {os.path.basename(diff_file)}")
     logger.info(f"  - Optimal lags: {os.path.basename(lags_file)}")
-    logger.info(f"  - MI mask (empty): {os.path.basename(mask_file)}")
     logger.info("="*80)
 
 

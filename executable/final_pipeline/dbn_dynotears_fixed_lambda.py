@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-DynoTEARS with FIXED Golden Lambdas
+DynoTEARS with Fixed Lambda Strategy
 
-This is a modified version of dbn_dynotears.py that uses hardcoded,
-pre-determined "Golden" lambda values instead of performing a global
-hyperparameter search.
+Uses fixed lambda values (calibrated on golden data) for both baseline
+and anomaly runs instead of performing separate hyperparameter searches.
 
 Purpose:
-To eliminate the "Butterfly Effect" where a future anomaly influences
-the global lambda selection, causing weight differences in early windows.
-By using fixed lambdas for both Golden and Anomaly runs, any observed
-weight difference is guaranteed to be a result of the data within the
-window itself.
+Eliminate the "Butterfly Effect" where a future anomaly influences
+global lambda selection, causing weight differences in early windows.
+By using the same lambdas for both Golden and Anomaly runs, any observed
+weight difference is guaranteed to result from the data itself, not from
+different regularization parameters.
 """
 
 import os

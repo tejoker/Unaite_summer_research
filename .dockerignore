@@ -1,0 +1,58 @@
+# Docker ignore file for Paul Wurth project
+
+# Data directories (too large for container)
+data/
+!data/.gitkeep
+
+# Results and logs
+results/
+logs/
+!results/.gitkeep
+!logs/.gitkeep
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
+config/local.yaml
+
+# Development files
+notebooks/
+*.ipynb
+
+# Documentation (include README.md)
+!README.md
+
+# Backup files
+*.bak
+*.backup
+*.tar.gz
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/

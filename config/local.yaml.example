@@ -1,0 +1,45 @@
+# Example local configuration file
+# Copy this to local.yaml and customize for your environment
+# local.yaml is ignored by git and will override default.yaml
+
+# System customization
+system:
+  gpu_enabled: false                   # Set to false if no GPU available
+  num_workers: 2                       # Adjust based on your CPU cores
+  memory_limit_gb: 16                  # Adjust based on available RAM
+  log_level: "DEBUG"                   # Set to DEBUG for development
+
+# Development paths
+data:
+  base_path: "data"                    # Relative to project root
+  # Uncomment to use absolute paths
+  # golden_path: "/path/to/your/golden/data"
+  # anomaly_path: "/path/to/your/anomaly/data"
+
+results:
+  base_path: "results"
+  auto_cleanup: true                   # Enable cleanup for development
+  retention_days: 7                    # Keep results for 1 week only
+
+# Development-specific DynoTears settings
+dynotears:
+  max_iter: 50                        # Reduce iterations for faster development
+  save_checkpoints: false             # Disable checkpoints for quick tests
+  device: "cpu"                       # Force CPU for debugging
+
+# Preprocessing for development
+preprocessing:
+  parallel:
+    enabled: false                     # Disable parallel processing for debugging
+    max_workers: 1
+
+# Quick experiments
+experiments:
+  name_template: "DEV_{type}_{dataset}_{timestamp}"  # Mark as development
+  track_git_info: false               # Skip git tracking for speed
+
+# Advanced debugging
+advanced:
+  debug_mode: true                    # Enable debug mode
+  profile_performance: true           # Enable performance profiling
+  save_intermediate_results: true     # Save all intermediate results

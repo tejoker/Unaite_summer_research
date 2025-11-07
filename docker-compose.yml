@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # GPU-enabled service for production workloads
+  paulwurth-gpu:
+    build:
+      context: .
+      target: production
+    image: paulwurth:cuda
+    container_name: paulwurth-gpu
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=8
+      - PAUL_WURTH_GPU_ENABLED=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - gpu
+    networks:
+      - paulwurth-net
+
+  # CPU-only service for development/testing
+  paulwurth-cpu:
+    build:
+      context: .
+      target: cpu-base
+    image: paulwurth:cpu
+    container_name: paulwurth-cpu
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - CUDA_VISIBLE_DEVICES=""
+      - OMP_NUM_THREADS=4
+      - PAUL_WURTH_GPU_ENABLED=false
+    profiles:
+      - cpu
+    networks:
+      - paulwurth-net
+
+  # Jupyter notebook service for interactive analysis
+  paulwurth-notebook:
+    build:
+      context: .
+      target: production
+    image: paulwurth:cuda
+    container_name: paulwurth-notebook
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./notebooks:/app/notebooks
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - PAUL_WURTH_GPU_ENABLED=true
+    command: >
+      bash -c "pip install jupyterlab &&
+               jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
+               --allow-root --NotebookApp.token='' --NotebookApp.password=''"
+    profiles:
+      - jupyter
+    networks:
+      - paulwurth-net
+
+  # Monitoring service
+  monitor:
+    image: prom/prometheus:latest
+    container_name: paulwurth-monitor
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    profiles:
+      - monitoring
+    networks:
+      - paulwurth-net
+
+networks:
+  paulwurth-net:
+    driver: bridge
+
+volumes:
+  paulwurth-data:
+  paulwurth-results:
+  paulwurth-logs:
