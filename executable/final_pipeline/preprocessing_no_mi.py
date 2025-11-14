@@ -170,13 +170,18 @@ def main():
     # Clean any remaining inf/nan values that might have appeared
     df_diff = df_diff.replace([np.inf, -np.inf], np.nan)
     
+    # CAUSAL-PRESERVING IMPUTATION: Forward fill only (no backfill to preserve causality)
+    # Forward fill carries last valid observation forward (respects temporal order)
     # For columns with all NaN or constant values, fill with zeros
     for col in df_diff.columns:
         if df_diff[col].isna().all() or df_diff[col].std() == 0:
             df_diff[col] = 0.0
         else:
-            # Fill any remaining NaN with column mean
-            df_diff[col] = df_diff[col].fillna(df_diff[col].mean())
+            # Forward fill ONLY - never use future information to fill past
+            df_diff[col] = df_diff[col].ffill()
+            # If still NaN at start (no previous value), use column mean as last resort
+            if df_diff[col].isna().any():
+                df_diff[col] = df_diff[col].fillna(df_diff[col].mean())
     
     # Standardize the data to prevent numerical issues in optimization
     # This is critical for datasets with thousands of variables

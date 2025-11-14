@@ -1,0 +1,56 @@
+# MAXIMUM RESOURCE UTILIZATION CONFIGURATION
+# For RTX 3090 (24GB) + 64 CPU cores
+# MEMORY-EFFICIENT SETTINGS to avoid OOM (exit code 137)
+
+# GPU Memory Optimization - reduced to prevent OOM with 2890 variables
+gpu_optimization:
+  memory_fraction: 0.70                 # Reduced from 95% - large datasets need more RAM
+  memory_efficient: true
+  enable_memory_pool: true
+  use_mixed_precision: false            # FP16 disabled - can cause numerical issues with 2890 vars
+  mixed_precision_dtype: "float32"      # Use FP32 for stability
+  gradient_checkpointing: true          # Trade compute for memory
+  adaptive_batch_size: true
+  min_batch_size: 8                     # Smaller batches for high-dim data
+  max_batch_size: 32                    # Reduced from 512
+  batch_size_growth_factor: 1.1
+
+# CPU Parallelization - maximize all 64 cores
+cpu_optimization:
+  num_threads: 60                       # Use 60/64 cores (leave 4 for system)
+  pytorch_threads: 60                   # PyTorch intra-op parallelism
+  numpy_threads: 60                     # NumPy/MKL threads
+  openblas_threads: 60                  # OpenBLAS threads
+  mkl_threads: 60                       # Intel MKL threads
+  parallel_windows: false               # Process sequentially to avoid memory explosion
+  window_workers: 1                     # One window at a time
+
+# Fast CAM-DAG Configuration (nonlinear causal discovery)
+# Note: These are READ by launcher.py as environment variables
+cam:
+  n_knots: "auto"                       # "auto" for adaptive selection, or integer (3-15)
+  lambda_smooth: 0.01                   # Smoothness penalty (or 'auto' for GCV)
+  use_gcv: false                        # Disable GCV (faster, use fixed lambda)
+  batch_mode: false                     # Disable batch mode to reduce memory
+  max_batch_windows: 1                  # Process 1 window at a time
+  adaptive_knots: true                  # Enable adaptive knot selection
+  min_knots: 3                          # Minimum knots for adaptive mode (IMPORTANT for memory)
+  max_knots: 6                          # Maximum knots reduced from 12 (memory constraint)
+
+# DynoTEARS Common Parameters
+dynotears:
+  save_checkpoints: true
+  checkpoint_interval: 10               # Less frequent checkpoints (faster)
+  use_gpu: true                         # Explicitly enable GPU
+  gpu_id: 0                             # Use GPU 0 (RTX 3090)
+  max_iter: 50                          # Reduce iterations if needed for speed
+  
+system:
+  gpu_enabled: true
+  memory_limit_gb: 23                   # Use almost all 24GB
+  cpu_limit_percent: 95                 # Use 95% of CPU capacity
+
+pipeline:
+  memory_monitoring: true
+  cleanup_intermediate: false           # Keep intermediate results (faster)
+  aggressive_mode: true                 # Maximum performance mode

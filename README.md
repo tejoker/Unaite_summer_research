@@ -1,354 +1,340 @@
-# Temporal Anomaly Detection via Rolling Window Causal Graph Evolution
+# Tucker-CAM: Tucker Decomposition for Causal Anomaly Mining
 
-Detects anomalies in multivariate time series by learning Dynamic Bayesian Networks (DBNs) and tracking structural changes in the causal graph. Uses DynoTEARS for causal discovery and a 4-metric ensemble for anomaly classification.
+**Scalable Temporal Causal Discovery for Anomaly Detection in Multivariate Time Series**
+
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+
+## Overview
+
+Tucker-CAM learns time-varying causal structures from multivariate time series using Tucker decomposition to enable efficient causal discovery on high-dimensional data. By analyzing how causal relationships evolve over time, the method can detect anomalies that manifest as structural changes in the underlying causal graph.
+
+**Key Innovation:** Tucker decomposition of the weight tensor enables learning causal graphs with thousands of variables while maintaining computational tractability and avoiding memory overflow.
+
+## Features
+
+- 🚀 **Scalable**: Handles 2,890 variables (NASA Telemanom spacecraft data)
+- ⚡ **Efficient**: Tucker decomposition + post-hoc Top-K sparsification
+- 🎯 **Accurate**: Detects anomalies via temporal causal structure evolution
+- 📊 **Interpretable**: Identifies which causal links change during anomalies
+- 🔄 **Temporal**: Rolling window analysis captures non-stationary dynamics
+
+## Method
+
+### Tucker-CAM Pipeline
+
+```
+Raw Time Series
+    ↓
+[1] Preprocessing
+    • Forward-fill imputation (causality-preserving)
+    • Log transform + differencing (stationarity)
+    • Standardization (numerical stability)
+    ↓
+[2] Causal Discovery (Tucker-CAM)
+    • Rolling windows (size=100, stride=10)
+    • Tucker decomposition of weight tensor
+    • DynoTEARS optimization (zero penalties)
+    • Post-hoc Top-K sparsification (K=10,000)
+    ↓
+[3] Anomaly Detection
+    • Compare Golden vs Anomaly causal graphs
+    • Statistical tests + classification
+    ↓
+Results: Temporal causal graphs + anomaly scores
+```
+
+### Tucker Decomposition
+
+High-dimensional weight tensor **W** (variables × variables × lags) is decomposed:
+
+```
+W ≈ G ×₁ U₁ ×₂ U₂ ×₃ U₃
+```
+
+Where:
+- **G**: Core tensor (compressed representation)
+- **U₁, U₂, U₃**: Factor matrices (latent dimensions)
+
+**Benefits:**
+- Reduces parameters from O(p²L) to O(r²L + rp) where r << p
+- Enables learning on 2,890 variables (8.3M possible edges)
+- Maintains expressiveness via rank tuning
+
+### Post-hoc Top-K Sparsification (Option D)
+
+1. **Training**: Learn dense graphs with zero penalties (λ₁=0, λ₂=0)
+2. **Sparsification**: Select Top-K=10,000 edges by absolute weight per window
+3. **Benefits**:
+   - Stable edge counts (CV=0%)
+   - No hyperparameter tuning (no λ grid search)
+   - Captures strongest causal relationships
+
+## Installation
+
+### Requirements
+
+- Python 3.8+
+- PyTorch 1.12+
+- CUDA 11.0+ (optional, for GPU acceleration)
+
+### Setup
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/tucker-cam.git
+cd tucker-cam
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# or: venv\Scripts\activate  # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Dependencies
+
+```txt
+torch>=1.12.0
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+statsmodels>=0.13.0
+scipy>=1.7.0
+```
+
+## Usage
+
+### Quick Start: Telemanom Dataset
+
+```bash
+# Process Golden (normal) and Anomaly datasets
+bash run_telemanom_comparison.sh
+
+# Analyze results
+python compare_golden_vs_anomaly.py
+```
+
+### Custom Dataset
+
+```python
+from executable.launcher import run_pipeline
+
+# Run on your data
+run_pipeline(
+    input_csv="your_data.csv",
+    output_dir="results/your_run",
+    tucker_top_k=10000,
+    window_size=100,
+    stride=10
+)
+```
+
+### Data Format
+
+Input: CSV file with shape (timesteps, variables)
+
+```csv
+timestamp,var1,var2,var3,...
+0,1.23,4.56,7.89,...
+1,1.25,4.52,7.91,...
+```
+
+**Notes:**
+- First column can be timestamp (will be used as index)
+- NaN values: Use forward-fill for causality preservation
+- Recommended: 1000+ timesteps for stable causal learning
 
 ## Datasets
 
-This method has been validated on the following real-world benchmarks:
+### NASA Telemanom (Primary Benchmark)
 
-- **NASA SMAP/MSL (Telemanom)**: Primary benchmark with multivariate telemetry data from two NASA missions. Contains expert-verified labels for anomalous periods from spacecraft operations.
+- **Source**: Spacecraft telemetry from SMAP & MSL missions
+- **Variables**: 82 channels × ~35 features = 2,890 dimensions
+- **Golden**: 4,308 timesteps (normal operation)
+- **Anomaly**: 8,640 timesteps (with labeled anomalies)
+- **Reference**: [Hundman et al., KDD 2018](https://arxiv.org/abs/1802.04431)
 
-- **Server Machine Dataset (SMD)**: Public benchmark from a large internet company for IT operations monitoring, containing multi-dimensional KPIs from server machines.
-
-The approach generalizes to any multivariate time series where anomalies manifest as changes in causal structure.
-
-## What this does
-
-Given a baseline period (normal behavior) and test windows:
-
-1. **Learn causal graphs** using DynoTEARS (a continuous optimization method for structure learning in DBNs with **linear structural equations**)
-2. **Compare graphs** between baseline and test windows across 4 metrics:
-   - **SHD** (Structural Hamming Distance): counts edge differences
-   - **Frobenius norm**: measures weight magnitude changes  
-   - **Spectral radius**: detects stability shifts
-   - **Max edge weight**: flags individual strong changes
-3. **Detect anomalies** when metrics exceed learned thresholds (voting ensemble)
-4. **Classify type**: spike, drift, level shift, trend change, amplitude change
-5. **Root cause analysis**: identifies which variables/edges changed
-
-**Model assumption:** Linear DBN (validated R²=0.84 on Telemanom dataset). Works well for continuous sensor data with approximately linear dynamics. See [Model Validation](#model-validation-and-applicability) section b
-
-## Quick start
+### Preprocessing Telemanom
 
 ```bash
-# Run on Telemanom golden baseline + one anomaly file
-./run_end_to_end_pipeline.sh
+cd telemanom
 
-# Or manually:
-python executable/launcher.py \
-    --baseline data/Golden/golden_period_dataset_mean_channel.csv \
-    --test data/Anomaly/telemanom/isolated_anomaly_001_P-1_seq1.csv \
-    --output results/my_run
+# Forward-fill imputation (causality-preserving)
+python3 << 'EOF'
+import pandas as pd
+
+# Golden dataset
+df = pd.read_csv('golden_period_dataset.csv')
+df.ffill().to_csv('golden_period_dataset_ffill.csv', index=False)
+
+# Anomaly dataset  
+df = pd.read_csv('test_dataset_merged.csv')
+df.ffill().to_csv('test_dataset_merged_ffill.csv', index=False)
+EOF
 ```
 
-## How it works
+## Configuration
 
-### Pipeline stages
+### Tucker-CAM Parameters
 
-**1. Preprocessing** (`preprocessing_no_mi.py`)
-- Makes series **stationary** (ADF/KPSS tests, differencing if needed) to remove trends/seasonality
-- **Standardizes** data (zero mean, unit variance) for numerical stability
-- Finds optimal lag structure via AutoReg AIC
-- No mutual information filtering (removed for simplicity)
-- **Note:** This ensures stationarity but does NOT linearize non-linear relationships
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `tucker_top_k` | 10000 | Top-K edges per window (post-hoc sparsification) |
+| `window_size` | 100 | Rolling window size (timesteps) |
+| `stride` | 10 | Window stride (overlap = window_size - stride) |
+| `tucker_rank` | 10 | Tucker decomposition rank |
+| `max_iter` | 100 | DynoTEARS optimization iterations |
 
-**2. Causal discovery** (`dbn_dynotears.py`)
-- Learns DBN structure using DynoTEARS (Zheng et al. 2020)
-- Estimates contemporaneous and lagged effects
-- Enforces acyclicity via augmented Lagrangian
-- Outputs: adjacency matrices `W` (contemporaneous) and `A` (lagged)
+### Memory Requirements
 
-**3. Graph comparison** (`binary_detection_metrics.py`)
-- Computes 4 metrics between baseline and test graphs:
-  - SHD: structural differences (edges added/removed)
-  - Frobenius: sum of squared weight changes
-  - Spectral: largest eigenvalue change
-  - MaxEdge: maximum single edge change
-- Returns binary detection (anomaly/normal) per metric
+- **10K edges**: ~19GB RAM (tested on Telemanom 2,890 vars)
+- **GPU**: Optional (3% utilization, 0.72GB VRAM)
+- **Recommendation**: 20GB+ RAM for large datasets
 
-**4. Anomaly classification** (`anomaly_classification.py`)
-- If detected, classifies into 6 types based on temporal patterns
-- Uses heuristics on metric trajectories across windows
+## Results
 
-**5. Root cause** (`root_cause_analysis.py`)
-- Identifies which edges changed most
-- Ranks variables by contribution to anomaly score
+### Telemanom Benchmark
 
-### Detection strategy
+Validated on 421 rolling windows:
 
-We use a **voting ensemble**: if ≥2 of the 4 metrics flag anomaly, we declare it.
+| Metric | Value |
+|--------|-------|
+| Edge count stability | CV=0.00% (exactly 10K/window) |
+| MSE range | 0.0004 - 0.6 |
+| Processing time | 2h 45m (421 windows) |
+| Memory peak | 4.15GB RAM, 0.72GB GPU |
+| Lagged edges | 99.98% (temporal causality) |
 
-Thresholds are learned from golden baseline by fitting each metric's distribution (μ + k·σ, where k is tuned for desired sensitivity).
-
-
-
-## Repository layout
+### Output Structure
 
 ```
-executable/
-├── final_pipeline/
-│   ├── preprocessing_no_mi.py       # Stationarity, differencing, lag selection
-│   ├── dbn_dynotears.py             # DBN structure learning (main algorithm)
-│   ├── dynotears.py                 # Core DynoTEARS optimization
-│   ├── structuremodel.py            # Neural net for structure learning
-│   ├── transformers.py              # Data transformations
-│   └── window_by_window_detection.py # Sliding window controller
-├── test/
-│   └── anomaly_detection_suite/
-│       ├── binary_detection_metrics.py    # 4-metric computation
-│       ├── anomaly_detection_suite.py     # Ensemble voting
-│       ├── anomaly_classification.py      # Type classification
-│       └── root_cause_analysis.py         # Edge importance ranking
-├── launcher.py                      # Main orchestrator
-└── causal_discovery_benchmark.py    # Performance testing
-
-config/
-├── default.yaml                     # Hyperparameters (lambda, thresholds, etc.)
-└── config_manager.py                # Config loading
-
-scripts/                             # Quick runners for common tasks
-analysis/                            # Visualization and reporting tools
+results/
+├── golden/
+│   ├── weights/
+│   │   └── weights_enhanced.csv     # Temporal causal graph
+│   └── golden_period_dataset_ffill_differenced_stationary_series.csv
+└── anomaly/
+    ├── weights/
+    │   └── weights_enhanced.csv     # Temporal causal graph
+    └── test_dataset_merged_ffill_differenced_stationary_series.csv
 ```
 
-Files are organized by function: preprocessing → discovery → detection → classification → analysis.
+### Causal Graph Format
 
-## Setup
-
-Requires Python 3.9+ and PyTorch. No GPU needed (runs fine on CPU).
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# For GPU acceleration (optional, faster for large datasets)
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-```
-
-Tested on Linux/macOS. Windows should work but YMMV with shell scripts.
-
-## Usage examples
-
-### Basic detection
-
-```bash
-# Run full pipeline on one anomaly file
-python executable/launcher.py \
-    --baseline data/Golden/golden_period_dataset_mean_channel.csv \
-    --test data/Anomaly/telemanom/isolated_anomaly_044_T-1_seq1.csv \
-    --output results/T1_seq1
-```
-
-### Batch processing
-
-```bash
-# Process all Telemanom anomalies in parallel
-./run_telemanom_parallel.sh
-```
-
-### Window-by-window detection
-
-```bash
-# Slide a window over long time series, detect changes
-python executable/final_pipeline/window_by_window_detection.py \
-    --baseline golden.csv \
-    --test long_series.csv \
-    --window-size 500 \
-    --step 100
-```
-
-### Custom config
-
-Edit `config/default.yaml` or pass parameters:
-
-```bash
-python executable/launcher.py \
-    --lambda-w 0.05 \
-    --lambda-a 0.05 \
-    --threshold-multiplier 3.0 \
-    ...
-```
-
-## Key parameters
-
-Most important knobs in `config/default.yaml`:
-
-```yaml
-# DynoTEARS sparsity penalties
-lambda_w: 0.1          # Contemporaneous edges (higher = sparser)
-lambda_a: 0.1          # Lagged edges
-
-# Detection thresholds
-threshold_multiplier: 2.5    # For μ + k·σ (higher = less sensitive)
-voting_threshold: 2          # Min metrics to vote "anomaly" (2/4 is default)
-
-# Optimization
-max_iter: 100          # DynoTEARS iterations
-h_tol: 1e-8           # Acyclicity constraint tolerance
-lr: 0.001             # Learning rate
-
-# Preprocessing
-differencing: auto     # "auto", "force", or "none"
-max_lag: 5            # Max lags to consider in AutoReg
-```
-
-Tuning advice:
-- **High false positives?** Increase `threshold_multiplier` or `voting_threshold`
-- **Missing anomalies?** Decrease thresholds, try `voting_threshold: 1`
-- **Graphs too dense?** Increase `lambda_w`/`lambda_a`
-- **Graphs too sparse?** Decrease them
-
-
-
-## Data format
-
-Input CSVs should have:
-- **First column**: timestamp (any parseable datetime format, or just integer index)
-- **Remaining columns**: numeric variables (sensors, channels, etc.)
-- **No missing values** (drop or interpolate beforehand)
-
-Example:
 ```csv
-timestamp,sensor_A,sensor_B,sensor_C
-2024-01-01 00:00:00,1.23,4.56,7.89
-2024-01-01 00:01:00,1.25,4.52,7.91
-...
+window_id,source,target,lag,weight
+0,var1_diff,var2_diff,1,0.234
+0,var3_diff,var1_diff,2,0.156
 ```
 
-The code handles stationarity and differencing internally. Just provide raw data.
+## Methodology
 
-## Output structure
+### 1. Preprocessing
 
-Results go to `results/<experiment_name>/`:
+- **Stationarity**: ADF/KPSS tests + differencing
+- **Imputation**: Forward-fill (preserves causality)
+- **Normalization**: StandardScaler (zero mean, unit variance)
+
+### 2. Causal Discovery
+
+**Objective:** Learn Dynamic Bayesian Network (DBN) structure
 
 ```
-results/my_run/
-├── preprocessing/
-│   ├── differenced_data.csv       # After stationarity transform
-│   ├── optimal_lags.csv           # Selected lags per variable
-│   └── preprocessing_summary.json
-├── causal_discovery/
-│   ├── W_matrix.csv               # Contemporaneous weights
-│   ├── A_matrix.csv               # Lagged weights
-│   └── dynotears_log.txt
-├── detection/
-│   ├── metric_scores.csv          # SHD, Frobenius, Spectral, MaxEdge
-│   ├── detection_result.json      # Binary: anomaly or not
-│   └── voting_summary.txt
-├── classification/
-│   └── anomaly_type.json          # If detected: spike, drift, etc.
-└── root_cause/
-    └── edge_importance.csv        # Ranked edges by contribution
+X(t) = Σ_{τ=1}^{L} W(τ) · X(t-τ) + noise
 ```
 
-All CSVs are plain text, easy to load in pandas/Excel/whatever.
+**Optimization:** DynoTEARS with Tucker decomposition
 
-## Performance
+```
+min_{G,U₁,U₂,U₃} ||X(t) - Σ_{τ} (G ×₁ U₁ ×₂ U₂ ×₃ U₃)(τ) · X(t-τ)||²
+s.t. DAG constraint (acyclicity)
+```
 
-On Telemanom (55-channel spacecraft telemetry, ~8000 timesteps per file):
+**Sparsification:** Select Top-K edges per window
 
-- **Preprocessing**: ~5-10s
-- **Causal discovery**: ~20-60s (CPU), ~10-30s (GPU)
-- **Detection**: <1s
-- **Total per file**: ~1-2 minutes
+### 3. Anomaly Detection
 
-Scales roughly O(n·p²) where n = timesteps, p = variables (due to graph learning).
+Compare Golden vs Anomaly graphs via:
+- Edge overlap (Jaccard similarity)
+- Weight distribution (KL divergence, Wasserstein distance)
+- Random Forest classification on graph features
 
-For very long series (>10k timesteps), use window-by-window mode to process in chunks.
+## Technical Details
 
-## Troubleshooting
+### Why Forward Fill Only?
 
-**"Singular matrix" or convergence errors**
-- Series might be too correlated. Try higher `lambda_w`/`lambda_a`
-- Check for constant columns (remove them)
+**Causality Preservation:** Forward-fill never uses future information to impute past values.
 
-**Detection too sensitive (many false positives)**
-- Increase `threshold_multiplier` from 2.5 to 3.0 or 4.0
-- Or require 3/4 metrics instead of 2/4: `voting_threshold: 3`
+```python
+# CORRECT: Forward fill (t-1 → t)
+df.ffill()
 
-**Missing real anomalies**
-- Decrease thresholds
-- Try `voting_threshold: 1` (any single metric triggers)
-- Check if baseline truly represents normal behavior
+# WRONG: Backward fill (t+1 → t) breaks causality!
+df.bfill()
+```
 
-**Slow on CPU**
-- Install PyTorch with CUDA support
-- Or reduce `max_iter` from 100 to 50
-- Or subsample long time series
+**Impact on Causal Discovery:**
+- Forward-filled segments → constant values → diff = 0
+- Low variance → weak causal weights (correct behavior!)
+- Active variables still detected with strong weights
 
-**Out of memory**
-- Reduce batch size or number of variables
-- Use window-by-window mode
+### Tucker Decomposition Details
 
-## Method details
+**Rank Selection:** r=10 (empirically validated)
+- Too low: Loss of expressiveness
+- Too high: Memory overhead, overfitting
 
-This implements the approach from:
+**Complexity:**
+- Dense: O(p²L) = O(2890² × 20) = 167M parameters
+- Tucker: O(r²L + rp) = O(10² × 20 + 10 × 2890) = 31K parameters
+- **Reduction: 5,400×**
 
-> Zheng, X., et al. (2020). "DAGs with NO TEARS: Continuous Optimization for Structure Learning." *NeurIPS 2018*.
+### Post-hoc Top-K vs In-training Sparsification
 
-Extended to Dynamic Bayesian Networks (DBNs) for time series. The acyclicity constraint uses an augmented Lagrangian to enforce DAG structure without discrete search.
-
-Anomaly detection is based on comparing learned graphs, similar to change-point detection but using structural metrics instead of raw data statistics.
-
-See [METRICS_CLARIFICATION.md](METRICS_CLARIFICATION.md) for why we use 4 metrics and how they complement each other.
-
-## Model Validation and Applicability
-
-**Linear Model Assumption:** This method assumes linear causal relationships (DBN with linear structural equations). We validated this assumption on real industrial data:
-
-### Validation Results (November 2025)
-
-Testing on **NASA Telemanom dataset** (spacecraft telemetry):
-- **R² = 0.84** (mean), **0.93** (median) on continuous sensors
-- **73% of variables** show excellent linear fit (R² ≥ 0.9)
-- **Conclusion:** Linear DBN model is **appropriate** for Telemanom-like data
-
-**Data characteristics that work well:**
-- Continuous sensor measurements (temperature, pressure, flow rates, etc.)
-- Physical processes with approximately linear dynamics
-- Data after preprocessing (stationarity + standardization)
-
-**Important notes:**
-1. **Preprocessing makes data stationary, NOT linear**
-   - Differencing removes trends/drifts (ensures stationarity)
-   - Standardization normalizes scale (zero mean, unit variance)
-   - **But non-linear relationships remain non-linear** (e.g., quadratic effects, interactions)
-
-2. **Dataset dependency**
-   - Validation showed only **1.4% of industrial variables** were truly continuous (60% were constant, 38% discrete/binary)
-   - Linear model works well on continuous sensors but not on categorical/discrete variables
-   - Always check your data: if relationships are highly non-linear, consider non-linear causal discovery methods
-
-3. **Gaussian noise assumption**
-   - Validation revealed residuals are **not perfectly Gaussian** (heavy tails observed)
-   - Model still performs well (R²=0.84) but this is a known limitation
-   - Future work: robust noise models (Student-t, Laplace distributions)
-
-**Recommendation:** The linear DBN is a practical and efficient approximation that works well for datasets similar to Telemanom (multivariate sensor data with predominantly linear dynamics). For highly non-linear systems (e.g., complex neural/biological networks, chaotic systems), consider non-linear alternatives like neural causal models or kernel-based methods.
-
-See `LINEAR_MODEL_VALIDATION.md` for complete validation report including R² distributions, residual analysis, and diagnostic plots.
-
----
+| Method | Edges/Window | Stability | Hyperparameters |
+|--------|--------------|-----------|-----------------|
+| L1 penalty | Variable | CV=15-30% | λ₁ (grid search) |
+| Tucker-CAM (Option D) | Stable | **CV=0%** | **None** (just K) |
 
 ## Limitations
 
-- Assumes anomalies manifest as causal structure changes (true for many system failures, but not all anomaly types)
-- **Linear model assumption:** Best suited for approximately linear dynamics (validated R²=0.84 on Telemanom)
-- **Not suitable for:** Highly non-linear systems, categorical/discrete variables, or data with <50 continuous sensors
-- Requires sufficient data in baseline to learn stable graph (~500+ timesteps recommended)
-- Detection thresholds are dataset-specific (tune on validation set)
-- Can't detect anomalies in single-variable series (need multivariate dependencies)
-- Gaussian noise assumption is approximate (residuals show some deviation from normality)
+1. **Linear assumption**: DBN assumes linear structural equations
+2. **Stationarity**: Requires preprocessing for non-stationary data
+3. **Window size**: Trade-off between temporal resolution and statistical power
+4. **Computational**: Scales to ~3K variables (tested), larger needs distributed computing
 
-## Documentation
+## Citation
 
-- [METRICS_CLARIFICATION.md](METRICS_CLARIFICATION.md): Why 4 metrics?
+If you use this code, please cite:
 
-## Contributing
+```bibtex
+@inproceedings{bigeard2025tuckercam,
+  title={Tucker-CAM: Scalable Temporal Causal Discovery for Anomaly Detection},
+  author={Bigeard, Nicolas and [Co-authors]},
+  booktitle={[Conference]},
+  year={2025}
+}
+```
 
-This was research code so it's rough around the edges. PRs welcome for:
-- Better documentation
-- More robust error handling  
-- Additional anomaly types
-- Benchmarks on other datasets
+## License
 
-File issues if something breaks.
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- **DynoTEARS**: Based on [DYNOTEARS](https://arxiv.org/abs/2002.00498) framework
+- **Telemanom**: NASA dataset from [Hundman et al., KDD 2018](https://arxiv.org/abs/1802.04431)
+- **Tucker Decomposition**: [Kolda & Bader, 2009](https://doi.org/10.1137/07070111X)
+
+## Contact
+
+- Nicolas Bigeard - [email]
+- Project: [GitHub Repository](https://github.com/yourusername/tucker-cam)
+
+## See Also
+
+- [TELEMANOM_PIPELINE_GUIDE.md](TELEMANOM_PIPELINE_GUIDE.md) - Detailed technical guide
+- [config/default.yaml](config/default.yaml) - Configuration reference

@@ -1,0 +1,222 @@
+╔════════════════════════════════════════════════════════════════╗
+║        ANOMALY SIGNATURE PIPELINE - QUICK REFERENCE            ║
+╚════════════════════════════════════════════════════════════════╝
+
+┌─ 🚀 QUICK START ─────────────────────────────────────────────┐
+│                                                                │
+│  TEST FIRST (Recommended):                                    │
+│  $ bash test_anomaly_pipeline.sh                              │
+│    ⏱️  ~1-2 hours (3 sample anomalies)                        │
+│                                                                │
+│  RUN FULL PIPELINE:                                           │
+│  $ bash run_anomaly_signature_pipeline.sh                     │
+│    ⏱️  ~35-40 hours (105 anomalies)                           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 📊 WHAT YOU GET ────────────────────────────────────────────┐
+│                                                                │
+│  1. Individual Results (105 folders):                         │
+│     results/anomaly_signatures/anomaly_*/                     │
+│       ├── differenced.csv                                     │
+│       ├── lags.csv                                            │
+│       └── weights/weights_enhanced.csv                        │
+│                                                                │
+│  2. Master Catalog:                                           │
+│     results/anomaly_signatures/anomaly_signature_catalog.csv  │
+│     → 20+ columns: edges, weights, lags, baseline changes     │
+│                                                                │
+│  3. Analysis (5 files):                                       │
+│     results/anomaly_signatures/analysis/                      │
+│       ├── class_comparison.png                                │
+│       ├── temporal_patterns.png                               │
+│       ├── spacecraft_comparison.png                           │
+│       ├── baseline_comparison.png                             │
+│       └── summary_statistics.txt                              │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 🔧 CONFIGURATION ───────────────────────────────────────────┐
+│                                                                │
+│  Tucker-CAM Settings (in run_anomaly_signature_pipeline.sh):  │
+│    TOP_K=10000         # Edges per window                     │
+│    WINDOW_SIZE=100     # Rolling window size                  │
+│    WINDOW_STRIDE=10    # Window stride                        │
+│                                                                │
+│  If Out of Memory:                                            │
+│    TOP_K=5000          # Reduce edges                         │
+│    WINDOW_SIZE=50      # Reduce window                        │
+│                                                                │
+│  If Too Slow:                                                 │
+│    WINDOW_STRIDE=20    # Increase stride (fewer windows)      │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 📈 KEY METRICS IN CATALOG ──────────────────────────────────┐
+│                                                                │
+│  Causal Structure:                                            │
+│    • total_edges        - Total causal edges detected         │
+│    • mean_weight        - Average edge strength               │
+│    • max_weight         - Strongest edge                      │
+│    • num_source_vars    - Active source variables             │
+│                                                                │
+│  Temporal:                                                    │
+│    • mean_lag           - Average temporal lag                │
+│    • lagged_edges       - Edges with lag > 0                  │
+│    • contemporaneous    - Edges with lag = 0                  │
+│                                                                │
+│  Baseline Comparison (if Golden provided):                    │
+│    • new_edges          - Edges appearing in anomaly          │
+│    • removed_edges      - Edges disappearing in anomaly       │
+│    • common_edges       - Edges in both (weight changed)      │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 🔬 RESEARCH QUESTIONS ──────────────────────────────────────┐
+│                                                                │
+│  Q1: Do point vs contextual have distinct signatures?         │
+│      → Compare total_edges by anomaly_class                   │
+│                                                                │
+│  Q2: Does anomaly length predict causal complexity?           │
+│      → Correlate anomaly_length with total_edges              │
+│                                                                │
+│  Q3: Which anomalies most disrupt causal structure?           │
+│      → Rank by new_edges + removed_edges                      │
+│                                                                │
+│  Q4: Can we predict anomaly type from causal signature?       │
+│      → Train classifier on edge metrics → anomaly_class       │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 🐛 TROUBLESHOOTING ─────────────────────────────────────────┐
+│                                                                │
+│  Problem: Out of Memory                                       │
+│  Fix:     Reduce TOP_K=5000 or WINDOW_SIZE=50                 │
+│                                                                │
+│  Problem: Test fails                                          │
+│  Fix:     Check logs in logs/anomaly_signatures_test/         │
+│           Verify environment variables:                       │
+│           echo $INPUT_DIFFERENCED_CSV                         │
+│           echo $INPUT_LAGS_CSV                                │
+│                                                                │
+│  Problem: Some anomalies fail                                 │
+│  Fix:     Short anomalies (<50 timesteps) may not work with   │
+│           WINDOW_SIZE=100. This is expected.                  │
+│                                                                │
+│  Problem: Slow runtime                                        │
+│  Fix:     Increase WINDOW_STRIDE or reduce TOP_K              │
+│           Expected: 20 min/anomaly (varies 5-60 min)          │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 📊 DATASET STATS ───────────────────────────────────────────┐
+│                                                                │
+│  Total Anomalies:      105                                    │
+│  SMAP:                 69 (25 features/channel)               │
+│  MSL:                  36 (55 features/channel)               │
+│                                                                │
+│  Anomaly Length:                                              │
+│    Min:      11 timesteps                                     │
+│    Max:      4,218 timesteps                                  │
+│    Mean:     617 timesteps                                    │
+│    Median:   121 timesteps                                    │
+│                                                                │
+│  Golden Baseline:      4,308 timesteps (consistent)           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 📚 FILES & DOCUMENTATION ───────────────────────────────────┐
+│                                                                │
+│  Scripts:                                                     │
+│    extract_individual_anomalies.py     - Extract anomalies   │
+│    run_anomaly_signature_pipeline.sh   - Full pipeline       │
+│    build_anomaly_signature_catalog.py  - Build catalog       │
+│    analyze_anomaly_signatures.py       - Generate analysis   │
+│    test_anomaly_pipeline.sh            - Quick test          │
+│                                                                │
+│  Docs:                                                        │
+│    ANOMALY_SIGNATURE_CATALOG_GUIDE.md  - Full guide (15K)    │
+│    PIPELINE_READY.md                   - Quick start (11K)   │
+│    QUICK_REFERENCE.txt                 - This file           │
+│                                                                │
+│  Data:                                                        │
+│    telemanom/individual_anomalies/     - 105 CSV files       │
+│    telemanom/individual_anomalies/anomaly_catalog.csv         │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ ⏱️  RUNTIME ESTIMATES ──────────────────────────────────────┐
+│                                                                │
+│  Quick Test:           1-2 hours (3 anomalies)                │
+│  Full Pipeline:        35-40 hours (105 anomalies)            │
+│                                                                │
+│  Per Anomaly Breakdown:                                       │
+│    Preprocessing:      30-60 seconds                          │
+│    Tucker-CAM:         15-30 minutes                          │
+│    Total:              ~20 minutes average                    │
+│                                                                │
+│  Catalog Building:     ~5 minutes                             │
+│  Analysis:             ~2 minutes                             │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ ✅ VALIDATION CHECKLIST ────────────────────────────────────┐
+│                                                                │
+│  Before Full Run:                                             │
+│    □ Test script passed (3 anomalies)                         │
+│    □ Logs show no errors                                      │
+│    □ Memory sufficient (check 'free -h')                      │
+│    □ Disk space sufficient (check 'df -h')                    │
+│                                                                │
+│  After Full Run:                                              │
+│    □ ≥90% anomalies have weights files                        │
+│    □ Catalog has 105 rows (or close)                          │
+│    □ Analysis plots generated (5 files)                       │
+│    □ Summary statistics computed                              │
+│                                                                │
+│  Publication Ready:                                           │
+│    □ Statistical tests show significance (p<0.05)             │
+│    □ Top edges interpretable                                  │
+│    □ Results reproducible (re-run matches)                    │
+│    □ Supplementary material prepared                          │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 🎯 SCIENTIFIC CONTRIBUTION ─────────────────────────────────┐
+│                                                                │
+│  Novel Contribution:                                          │
+│    → First causal anomaly signature catalog in literature    │
+│                                                                │
+│  Methodology:                                                 │
+│    → Isolated anomaly analysis (not merged)                   │
+│    → Tucker-CAM for causal discovery                          │
+│    → Ground truth labels from NASA Telemanom                  │
+│                                                                │
+│  Deliverables:                                                │
+│    → Signature catalog mapping anomaly → causal pattern       │
+│    → Statistical validation of class differences              │
+│    → Publication-quality visualizations                       │
+│    → Reproducible pipeline                                    │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ 🚀 READY TO RUN! ───────────────────────────────────────────┐
+│                                                                │
+│  Step 1: Test                                                 │
+│    $ bash test_anomaly_pipeline.sh                            │
+│                                                                │
+│  Step 2: Full Pipeline                                        │
+│    $ bash run_anomaly_signature_pipeline.sh                   │
+│                                                                │
+│  Step 3: Analyze                                              │
+│    $ cat results/anomaly_signatures/                          │
+│          anomaly_signature_catalog.csv                        │
+│    $ open results/anomaly_signatures/analysis/*.png           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+════════════════════════════════════════════════════════════════
+Status:  ✅ READY FOR PRODUCTION
+Version: 1.0
+Date:    November 13, 2025
+════════════════════════════════════════════════════════════════
