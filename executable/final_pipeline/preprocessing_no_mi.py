@@ -153,8 +153,26 @@ def main():
     if non_stationary:
         logger.warning(f"Non-stationary series: {non_stationary}")
 
-    # Step 2: Apply differencing to all series
-    logger.info("\nStep 2: Applying differencing to all series")
+    # Step 2: NaN handling BEFORE differencing (causality-preserving)
+    logger.info("\nStep 2: NaN handling (ffill + dropna)")
+    logger.info("-"*40)
+    nan_count_before = df_raw.isna().sum().sum()
+    logger.info(f"NaN count before: {nan_count_before}")
+
+    # Forward fill (preserves temporal causality)
+    df_raw = df_raw.ffill()
+    nan_after_ffill = df_raw.isna().sum().sum()
+    logger.info(f"NaN count after ffill: {nan_after_ffill}")
+
+    # Drop rows with remaining NaN (leading values that couldn't be filled)
+    rows_before = len(df_raw)
+    df_raw = df_raw.dropna()
+    rows_dropped = rows_before - len(df_raw)
+    logger.info(f"Rows dropped: {rows_dropped} (leading NaN)")
+    logger.info(f"Final NaN count: {df_raw.isna().sum().sum()}")
+
+    # Step 3: Apply differencing to all series
+    logger.info("\nStep 3: Applying differencing to all series")
     logger.info("-"*40)
 
     df_diff = pd.DataFrame()
@@ -163,7 +181,7 @@ def main():
         series_log = np.log1p(df_raw[col])
         series_diff = series_log.diff()
         df_diff[f"{col}_diff"] = series_diff
-    
+
     # Remove the first row (NaN from diff) across all columns
     df_diff = df_diff.iloc[1:].reset_index(drop=True)
     
@@ -193,8 +211,8 @@ def main():
     df_diff.to_csv(diff_file)
     logger.info(f"Saved differenced data to: {diff_file}")
 
-    # Step 3: Find optimal lags (or use provided lags)
-    logger.info("\nStep 3: Optimal lags determination")
+    # Step 4: Find optimal lags (or use provided lags)
+    logger.info("\nStep 4: Optimal lags determination")
     logger.info("-"*40)
     
     if provided_lags_file and os.path.exists(provided_lags_file):

@@ -94,25 +94,29 @@ def run_preprocessing(data_file, result_dir, input_basename):
 
 def run_dynotears(data_file, result_dir, input_basename):
     """Run DynoTEARS analysis"""
-    print(f"Step 2: DynoTEARS Analysis")
-    
+    # Check if Tucker-CAM should be used
+    use_tucker = os.getenv('USE_TUCKER_CAM', 'false').lower() in ('true', '1', 'yes', 'on')
+    method_name = "Tucker-CAM" if use_tucker else "DynoTEARS"
+
+    print(f"Step 2: {method_name} Analysis")
+
     preprocessing_dir = result_dir / 'preprocessing'
     weights_dir = result_dir / 'weights'
     weights_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Find preprocessing output files
     differenced_file = preprocessing_dir / f'{input_basename}_differenced_stationary_series.csv'
     lags_file = preprocessing_dir / f'{input_basename}_optimal_lags.csv'
-    
+
     if not differenced_file.exists():
         print(f"Error: Differenced file not found: {differenced_file}")
         return False
-    
+
     if not lags_file.exists():
         print(f"Error: Lags file not found: {lags_file}")
         return False
-    
-    # Environment variables for DynoTEARS - pass through all existing env vars
+
+    # Environment variables for DynoTEARS/Tucker-CAM - pass through all existing env vars
     env_vars = os.environ.copy()
     env_vars.update({
         'INPUT_DIFFERENCED_CSV': str(differenced_file),
@@ -120,36 +124,39 @@ def run_dynotears(data_file, result_dir, input_basename):
         'RESULT_DIR': str(result_dir),
         'PYTHONPATH': str(Path(__file__).parent / "final_pipeline")
     })
-    
+
     weights_dir = result_dir / 'causal_discovery'
-    
-    # Run DynoTEARS
-    dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_fixed_lambda.py"
-    
+
+    # Select script based on USE_TUCKER_CAM flag
+    if use_tucker:
+        dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_tucker_cam.py"
+    else:
+        dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_fixed_lambda.py"
+
     print(f"Running: python {dynotears_script}")
     print(f"Differenced data: {differenced_file}")
     print(f"Lags file: {lags_file}")
     print(f"Output: {weights_dir}")
-    
+
     # Get workspace root (parent of executable/)
     workspace_root = Path(__file__).parent.parent
-    
+
     try:
         result = subprocess.run([
             sys.executable, str(dynotears_script)
         ], env=env_vars, capture_output=True, text=True, cwd=workspace_root)
-        
+
         if result.returncode != 0:
-            print(f"DynoTEARS failed with return code {result.returncode}")
+            print(f"{method_name} failed with return code {result.returncode}")
             print(f"STDOUT: {result.stdout}")
             print(f"STDERR: {result.stderr}")
             return False
-        
-        print("DynoTEARS analysis completed successfully")
+
+        print(f"{method_name} analysis completed successfully")
         return True
-        
+
     except Exception as e:
-        print(f"Error running DynoTEARS: {e}")
+        print(f"Error running {method_name}: {e}")
         return False
 
 def run_pipeline(data_file, output_dir=None, resume=True, skip_steps=None):
