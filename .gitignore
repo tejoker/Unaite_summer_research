@@ -5,6 +5,8 @@ results/
 !data/.gitkeep
 !logs/.gitkeep
 !results/.gitkeep
+archive/
+.archive/
 
 # Large data files
 *.csv

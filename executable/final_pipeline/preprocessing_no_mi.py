@@ -40,7 +40,13 @@ def parallel_stationarity_test(series, alpha=ALPHA_STATIONARITY):
         if len(series_clean) == 0 or series_clean.std() == 0:
             return series.name, False, 1.0, 0.0
         
-        series_log = np.log1p(series_clean)
+        # Add epsilon to avoid log(0) and handle near-zero values
+        epsilon = 1e-10
+        series_shifted = series_clean + abs(series_clean.min()) + epsilon if series_clean.min() <= 0 else series_clean + epsilon
+        
+        # Suppress warnings for log1p
+        with np.errstate(divide='ignore', invalid='ignore'):
+            series_log = np.log1p(series_shifted)
         
         # Check for inf/nan after log transform
         if not np.isfinite(series_log).all():
@@ -48,15 +54,19 @@ def parallel_stationarity_test(series, alpha=ALPHA_STATIONARITY):
         
         series_diff = series_log.diff().dropna()
         
-        # Check for inf/nan after differencing
-        if len(series_diff) == 0 or not np.isfinite(series_diff).all():
+        # Check for inf/nan or zero variance after differencing
+        if len(series_diff) == 0 or not np.isfinite(series_diff).all() or series_diff.std() == 0:
             return series.name, False, 1.0, 0.0
 
         # ADF test (H0: non-stationary)
-        adf_stat, adf_p, _, _, _, _ = adfuller(series_diff, maxlag=20)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            adf_stat, adf_p, _, _, _, _ = adfuller(series_diff, maxlag=20)
 
-        # KPSS test (H0: stationary)
-        kpss_stat, kpss_p, _, _ = kpss(series_diff, nlags='auto')
+        # KPSS test (H0: stationary) - suppress interpolation warnings
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=Warning)
+            kpss_stat, kpss_p, _, _ = kpss(series_diff, nlags='auto')
 
         is_stationary = (adf_p < alpha) and (kpss_p > alpha)
         return series.name, is_stationary, adf_p, kpss_p
@@ -71,10 +81,17 @@ def find_optimal_lag(series, max_lag=20, lb_lags=10, alpha=0.05):
     Find smallest AR lag p where residuals pass Ljung-Box test
     """
     try:
-        y = np.log1p(series.dropna()).diff().dropna()
+        series_clean = series.dropna()
         
-        # Check for inf/nan or insufficient data
-        if len(y) < 10 or not np.isfinite(y).all():
+        # Add epsilon to avoid log(0)
+        epsilon = 1e-10
+        series_shifted = series_clean + abs(series_clean.min()) + epsilon if series_clean.min() <= 0 else series_clean + epsilon
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            y = np.log1p(series_shifted).diff().dropna()
+        
+        # Check for inf/nan, insufficient data, or zero variance
+        if len(y) < 10 or not np.isfinite(y).all() or y.std() == 0:
             return 1  # Default to lag 1
         
         p_max = max(1, min(max_lag, len(y) // 5))
@@ -153,8 +170,26 @@ def main():
     if non_stationary:
         logger.warning(f"Non-stationary series: {non_stationary}")
 
-    # Step 2: Apply differencing to all series
-    logger.info("\nStep 2: Applying differencing to all series")
+    # Step 2: NaN handling BEFORE differencing (causality-preserving)
+    logger.info("\nStep 2: NaN handling (ffill + dropna)")
+    logger.info("-"*40)
+    nan_count_before = df_raw.isna().sum().sum()
+    logger.info(f"NaN count before: {nan_count_before}")
+
+    # Forward fill (preserves temporal causality)
+    df_raw = df_raw.ffill()
+    nan_after_ffill = df_raw.isna().sum().sum()
+    logger.info(f"NaN count after ffill: {nan_after_ffill}")
+
+    # Drop rows with remaining NaN (leading values that couldn't be filled)
+    rows_before = len(df_raw)
+    df_raw = df_raw.dropna()
+    rows_dropped = rows_before - len(df_raw)
+    logger.info(f"Rows dropped: {rows_dropped} (leading NaN)")
+    logger.info(f"Final NaN count: {df_raw.isna().sum().sum()}")
+
+    # Step 3: Apply differencing to all series
+    logger.info("\nStep 3: Applying differencing to all series")
     logger.info("-"*40)
 
     df_diff = pd.DataFrame()
@@ -163,7 +198,7 @@ def main():
         series_log = np.log1p(df_raw[col])
         series_diff = series_log.diff()
         df_diff[f"{col}_diff"] = series_diff
-    
+
     # Remove the first row (NaN from diff) across all columns
     df_diff = df_diff.iloc[1:].reset_index(drop=True)
     
@@ -193,8 +228,8 @@ def main():
     df_diff.to_csv(diff_file)
     logger.info(f"Saved differenced data to: {diff_file}")
 
-    # Step 3: Find optimal lags (or use provided lags)
-    logger.info("\nStep 3: Optimal lags determination")
+    # Step 4: Find optimal lags (or use provided lags)
+    logger.info("\nStep 4: Optimal lags determination")
     logger.info("-"*40)
     
     if provided_lags_file and os.path.exists(provided_lags_file):
