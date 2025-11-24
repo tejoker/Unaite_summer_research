@@ -40,7 +40,13 @@ def parallel_stationarity_test(series, alpha=ALPHA_STATIONARITY):
         if len(series_clean) == 0 or series_clean.std() == 0:
             return series.name, False, 1.0, 0.0
         
-        series_log = np.log1p(series_clean)
+        # Add epsilon to avoid log(0) and handle near-zero values
+        epsilon = 1e-10
+        series_shifted = series_clean + abs(series_clean.min()) + epsilon if series_clean.min() <= 0 else series_clean + epsilon
+        
+        # Suppress warnings for log1p
+        with np.errstate(divide='ignore', invalid='ignore'):
+            series_log = np.log1p(series_shifted)
         
         # Check for inf/nan after log transform
         if not np.isfinite(series_log).all():
@@ -48,15 +54,19 @@ def parallel_stationarity_test(series, alpha=ALPHA_STATIONARITY):
         
         series_diff = series_log.diff().dropna()
         
-        # Check for inf/nan after differencing
-        if len(series_diff) == 0 or not np.isfinite(series_diff).all():
+        # Check for inf/nan or zero variance after differencing
+        if len(series_diff) == 0 or not np.isfinite(series_diff).all() or series_diff.std() == 0:
             return series.name, False, 1.0, 0.0
 
         # ADF test (H0: non-stationary)
-        adf_stat, adf_p, _, _, _, _ = adfuller(series_diff, maxlag=20)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            adf_stat, adf_p, _, _, _, _ = adfuller(series_diff, maxlag=20)
 
-        # KPSS test (H0: stationary)
-        kpss_stat, kpss_p, _, _ = kpss(series_diff, nlags='auto')
+        # KPSS test (H0: stationary) - suppress interpolation warnings
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=Warning)
+            kpss_stat, kpss_p, _, _ = kpss(series_diff, nlags='auto')
 
         is_stationary = (adf_p < alpha) and (kpss_p > alpha)
         return series.name, is_stationary, adf_p, kpss_p
@@ -71,10 +81,17 @@ def find_optimal_lag(series, max_lag=20, lb_lags=10, alpha=0.05):
     Find smallest AR lag p where residuals pass Ljung-Box test
     """
     try:
-        y = np.log1p(series.dropna()).diff().dropna()
+        series_clean = series.dropna()
         
-        # Check for inf/nan or insufficient data
-        if len(y) < 10 or not np.isfinite(y).all():
+        # Add epsilon to avoid log(0)
+        epsilon = 1e-10
+        series_shifted = series_clean + abs(series_clean.min()) + epsilon if series_clean.min() <= 0 else series_clean + epsilon
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            y = np.log1p(series_shifted).diff().dropna()
+        
+        # Check for inf/nan, insufficient data, or zero variance
+        if len(y) < 10 or not np.isfinite(y).all() or y.std() == 0:
             return 1  # Default to lag 1
         
         p_max = max(1, min(max_lag, len(y) // 5))

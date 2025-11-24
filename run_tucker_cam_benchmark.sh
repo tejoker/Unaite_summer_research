@@ -27,6 +27,9 @@ fi
 # ============================================================================
 export USE_TUCKER_CAM=true
 
+# PyTorch memory allocator configuration to reduce fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Tucker ranks (memory/expressiveness tradeoff)
 export TUCKER_RANK_W=20        # Contemporaneous edges (higher = more expressive)
 export TUCKER_RANK_A=10        # Lagged edges (can be lower)
@@ -136,12 +139,34 @@ echo "  ✓ Preprocessing complete ($PREPROC_SIZE)"
 
 # Tucker-CAM
 echo "  [2/2] Running Tucker-CAM..."
-$PYTHON executable/launcher.py --skip-steps preprocessing >> "$GOLDEN_LOG" 2>&1
+TUCKER_START=$(date +%s)
+echo "    → Started at $(date)"
+echo "    → Command: $PYTHON executable/launcher.py --skip-steps preprocessing"
+echo "    → Logging to: $GOLDEN_LOG"
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Tucker-CAM failed! Check log: $GOLDEN_LOG"
+$PYTHON executable/launcher.py --skip-steps preprocessing >> "$GOLDEN_LOG" 2>&1
+TUCKER_EXIT_CODE=$?
+TUCKER_END=$(date +%s)
+TUCKER_DURATION=$((TUCKER_END - TUCKER_START))
+
+echo "    → Finished at $(date) (${TUCKER_DURATION}s elapsed)"
+echo "    → Exit code: $TUCKER_EXIT_CODE"
+
+if [ $TUCKER_EXIT_CODE -ne 0 ]; then
+    echo "  ✗ Tucker-CAM failed with exit code $TUCKER_EXIT_CODE! Last 30 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -30 "$GOLDEN_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
+
+# Check what files were created
+echo "    → Checking output directories..."
+echo "      Results dir: ${GOLDEN_OUTPUT}"
+find "${GOLDEN_OUTPUT}" -type f -name "*.csv" 2>/dev/null | while read f; do
+    SIZE=$(du -h "$f" | cut -f1)
+    echo "      Found: $f ($SIZE)"
+done
 
 # Verify output
 if [ -f "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" ]; then
@@ -150,7 +175,12 @@ if [ -f "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" ]; then
     echo "  ✓ Tucker-CAM complete"
     echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 else
-    echo "  ✗ Weights file not found!"
+    echo "  ✗ Weights file not found at expected location!"
+    echo "    → Expected: ${GOLDEN_OUTPUT}/weights/weights_enhanced.csv"
+    echo "    → Last 50 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -50 "$GOLDEN_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
@@ -200,12 +230,34 @@ echo "  ✓ Preprocessing complete ($PREPROC_SIZE)"
 
 # Tucker-CAM
 echo "  [2/2] Running Tucker-CAM..."
-$PYTHON executable/launcher.py --skip-steps preprocessing >> "$TEST_LOG" 2>&1
+TUCKER_START=$(date +%s)
+echo "    → Started at $(date)"
+echo "    → Command: $PYTHON executable/launcher.py --skip-steps preprocessing"
+echo "    → Logging to: $TEST_LOG"
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Tucker-CAM failed! Check log: $TEST_LOG"
+$PYTHON executable/launcher.py --skip-steps preprocessing >> "$TEST_LOG" 2>&1
+TUCKER_EXIT_CODE=$?
+TUCKER_END=$(date +%s)
+TUCKER_DURATION=$((TUCKER_END - TUCKER_START))
+
+echo "    → Finished at $(date) (${TUCKER_DURATION}s elapsed)"
+echo "    → Exit code: $TUCKER_EXIT_CODE"
+
+if [ $TUCKER_EXIT_CODE -ne 0 ]; then
+    echo "  ✗ Tucker-CAM failed with exit code $TUCKER_EXIT_CODE! Last 30 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -30 "$TEST_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
+
+# Check what files were created
+echo "    → Checking output directories..."
+echo "      Results dir: ${TEST_OUTPUT}"
+find "${TEST_OUTPUT}" -type f -name "*.csv" 2>/dev/null | while read f; do
+    SIZE=$(du -h "$f" | cut -f1)
+    echo "      Found: $f ($SIZE)"
+done
 
 # Verify output
 if [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
@@ -214,7 +266,12 @@ if [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
     echo "  ✓ Tucker-CAM complete"
     echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 else
-    echo "  ✗ Weights file not found!"
+    echo "  ✗ Weights file not found at expected location!"
+    echo "    → Expected: ${TEST_OUTPUT}/weights/weights_enhanced.csv"
+    echo "    → Last 50 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -50 "$TEST_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
@@ -225,31 +282,99 @@ echo "✓ Test timeline complete in ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 6
 echo ""
 
 # ============================================================================
+# STAGE 3: Dual-Metric Anomaly Detection
+# ============================================================================
+echo "[STAGE 3/3] Dual-Metric Anomaly Detection"
+echo "────────────────────────────────────────────────────────────────────────────────"
+echo ""
+
+ANOMALY_OUTPUT="results/anomaly_detection"
+ANOMALY_LOG="logs/anomaly_detection.log"
+
+mkdir -p "$ANOMALY_OUTPUT" "$(dirname "$ANOMALY_LOG")"
+
+echo "Golden baseline: results/golden_baseline/weights/weights_enhanced.csv"
+echo "Test timeline:   results/test_timeline/weights/weights_enhanced.csv"
+echo "Output:          $ANOMALY_OUTPUT"
+echo "Log:             $ANOMALY_LOG"
+echo ""
+
+# Run dual-metric anomaly detection
+echo "  Running dual-metric detection..."
+$PYTHON executable/dual_metric_anomaly_detection.py \
+    --golden results/golden_baseline/weights/weights_enhanced.csv \
+    --test results/test_timeline/weights/weights_enhanced.csv \
+    --output "$ANOMALY_OUTPUT/anomaly_detection_results.csv" \
+    --metric frobenius \
+    --lookback 5 \
+    --lag 0 > "$ANOMALY_LOG" 2>&1
+
+if [ $? -ne 0 ]; then
+    echo "  ✗ Anomaly detection failed! Check log: $ANOMALY_LOG"
+    echo ""
+    echo "  This is not critical - the weights are still available for manual analysis."
+    echo "  You can run anomaly detection separately later."
+    echo ""
+else
+    # Verify output
+    if [ -f "$ANOMALY_OUTPUT/anomaly_detection_results.csv" ]; then
+        RESULTS_SIZE=$(du -h "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | cut -f1)
+        NUM_ANOMALIES=$(grep -v "NORMAL" "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | tail -n +2 | wc -l)
+        TOTAL_WINDOWS=$(tail -n +2 "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | wc -l)
+        echo "  ✓ Anomaly detection complete"
+        echo "    → Results: $RESULTS_SIZE ($NUM_ANOMALIES anomalies in $TOTAL_WINDOWS windows)"
+
+        # Show detection summary
+        echo ""
+        echo "  Detection Summary:"
+        echo "  ──────────────────────────────────────────────────────────────────"
+        tail -n 20 "$ANOMALY_LOG" | grep -E "NORMAL|NEW_ANOMALY_ONSET|RECOVERY_FLUCTUATION|CASCADE_OR_PERSISTENT|windows" || true
+        echo "  ──────────────────────────────────────────────────────────────────"
+    else
+        echo "  ✗ Results file not created!"
+    fi
+fi
+
+STAGE3_TIME=$(date +%s)
+STAGE3_DURATION=$((STAGE3_TIME - STAGE2_TIME))
+echo ""
+echo "✓ Anomaly detection complete in ${STAGE3_DURATION}s"
+echo ""
+
+# ============================================================================
 # Final Summary
 # ============================================================================
 END_TIME=$(date +%s)
 TOTAL_DURATION=$((END_TIME - START_TIME))
 
 echo "================================================================================"
-echo "PIPELINE COMPLETE!"
+echo "TUCKER-CAM BENCHMARK COMPLETE!"
 echo "================================================================================"
 echo ""
 echo "Stage Summary:"
-echo "  [0/2] Dataset preparation: ${STAGE0_DURATION}s"
-echo "  [1/2] Golden baseline:     ${STAGE1_DURATION}s (~$((STAGE1_DURATION / 60)) min)"
-echo "  [2/2] Test timeline:       ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 60)) min)"
+echo "  [0/3] Dataset preparation:     ${STAGE0_DURATION}s"
+echo "  [1/3] Golden baseline:         ${STAGE1_DURATION}s (~$((STAGE1_DURATION / 60)) min)"
+echo "  [2/3] Test timeline:           ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 60)) min)"
+echo "  [3/3] Anomaly detection:       ${STAGE3_DURATION}s"
 echo ""
 echo "Total runtime: $((TOTAL_DURATION / 3600))h $((TOTAL_DURATION % 3600 / 60))m $((TOTAL_DURATION % 60))s"
 echo ""
 echo "Output locations:"
-echo "  Golden:  results/golden_baseline/weights/weights_enhanced.csv"
-echo "  Test:    results/test_timeline/weights/weights_enhanced.csv"
+echo "  Golden weights:    results/golden_baseline/weights/weights_enhanced.csv"
+echo "  Test weights:      results/test_timeline/weights/weights_enhanced.csv"
+echo "  Anomaly results:   results/anomaly_detection/anomaly_detection_results.csv"
+echo ""
+echo "Logs:"
+echo "  Golden baseline:   logs/golden_baseline.log"
+echo "  Test timeline:     logs/test_timeline.log"
+echo "  Anomaly detection: logs/anomaly_detection.log"
 echo ""
 echo "================================================================================"
 echo "Next steps:"
-echo "  1. Apply dual-metric anomaly detection (see todolist.md)"
-echo "  2. Evaluate against labeled anomalies"
-echo "  3. Compare with LSTM baseline (Hundman 2018)"
+echo "  1. Review anomaly detection results in results/anomaly_detection/"
+echo "  2. Evaluate against labeled anomalies (telemanom/labeled_anomalies.csv)"
+echo "  3. Compare with LSTM baseline (Hundman et al. 2018)"
+echo "  4. Perform root cause analysis on detected anomalies"
 echo "================================================================================"
 echo ""
 

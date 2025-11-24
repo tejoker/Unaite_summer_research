@@ -190,16 +190,30 @@ class TuckerCAMModel(nn.Module):
         W_coefs = self.get_W_coefs()  # (d, d, K)
         A_coefs = self.get_A_coefs()  # (d, d, p, K)
 
-        # Apply basis functions: (n, K) @ (d, d, K) -> (n, d, d)
-        W_funcs = torch.einsum('nk,ijk->nij', self.B_w[:n], W_coefs)
-        A_funcs = torch.einsum('nk,ijlk->nijl', self.B_a[:n], A_coefs)
+        # Apply basis functions with chunking to reduce memory usage
+        # Compute contributions directly without materializing full W_funcs/A_funcs tensors
+        chunk_size = 100  # RTX 3090 24GB can handle larger chunks for better GPU utilization
 
         # Contemporaneous effects: X[n,d] @ W[n,d,d] -> (n,d)
-        contrib_w = torch.einsum('ni,nij->nj', X, W_funcs)
+        # Instead of computing full W_funcs, compute contribution chunk by chunk
+        contrib_w = torch.zeros(n, self.d, device=W_coefs.device, dtype=W_coefs.dtype)
+        for i in range(0, self.d, chunk_size):
+            i_end = min(i + chunk_size, self.d)
+            # W_funcs[:, i:i_end, :] shape (n, chunk, d)
+            W_funcs_chunk = torch.einsum('nk,ijk->nij', self.B_w[:n], W_coefs[i:i_end])
+            # Accumulate contribution from this chunk
+            contrib_w += torch.einsum('ni,nij->nj', X[:, i:i_end], W_funcs_chunk)
 
         # Lagged effects: Xlags[n,d*p] @ A[n,d,d,p] -> (n,d)
+        # Instead of computing full A_funcs, compute contribution chunk by chunk
         Xlags_reshaped = Xlags.reshape(n, self.d, self.p)
-        contrib_a = torch.einsum('nil,nijl->nj', Xlags_reshaped, A_funcs)
+        contrib_a = torch.zeros(n, self.d, device=A_coefs.device, dtype=A_coefs.dtype)
+        for i in range(0, self.d, chunk_size):
+            i_end = min(i + chunk_size, self.d)
+            # A_funcs[:, i:i_end, :, :] shape (n, chunk, d, p)
+            A_funcs_chunk = torch.einsum('nk,ijlk->nijl', self.B_a[:n], A_coefs[i:i_end])
+            # Accumulate contribution from this chunk
+            contrib_a += torch.einsum('nil,nijl->nj', Xlags_reshaped[:, i:i_end, :], A_funcs_chunk)
 
         predictions = contrib_w + contrib_a
         return predictions
@@ -209,16 +223,27 @@ class TuckerCAMModel(nn.Module):
         Compute smoothness penalty for all edges (Tucker-aware).
 
         Penalizes variation in coefficient functions to encourage smoothness.
+        Uses chunking to avoid OOM on large tensors.
         """
-        # For W: penalize differences in K dimension
-        W_coefs = self.get_W_coefs()  # (d, d, K)
-        W_diff = W_coefs[:, :, 1:] - W_coefs[:, :, :-1]
-        penalty_w = torch.sum(W_diff ** 2)
+        chunk_size = 100  # RTX 3090 24GB can handle larger chunks
 
-        # For A: penalize differences in K dimension
+        # For W: penalize differences in K dimension (chunked)
+        W_coefs = self.get_W_coefs()  # (d, d, K)
+        penalty_w = 0.0
+        for i in range(0, self.d, chunk_size):
+            i_end = min(i + chunk_size, self.d)
+            W_chunk = W_coefs[i:i_end]  # (chunk, d, K)
+            W_diff_chunk = W_chunk[:, :, 1:] - W_chunk[:, :, :-1]
+            penalty_w += torch.sum(W_diff_chunk ** 2)
+
+        # For A: penalize differences in K dimension (chunked)
         A_coefs = self.get_A_coefs()  # (d, d, p, K)
-        A_diff = A_coefs[:, :, :, 1:] - A_coefs[:, :, :, :-1]
-        penalty_a = torch.sum(A_diff ** 2)
+        penalty_a = 0.0
+        for i in range(0, self.d, chunk_size):
+            i_end = min(i + chunk_size, self.d)
+            A_chunk = A_coefs[i:i_end]  # (chunk, d, p, K)
+            A_diff_chunk = A_chunk[:, :, :, 1:] - A_chunk[:, :, :, :-1]
+            penalty_a += torch.sum(A_diff_chunk ** 2)
 
         return self.lambda_smooth * (penalty_w + penalty_a)
 

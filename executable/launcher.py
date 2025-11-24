@@ -78,18 +78,24 @@ def run_preprocessing(data_file, result_dir, input_basename):
         result = subprocess.run([
             sys.executable, str(preprocessing_script)
         ], env=env_vars, capture_output=True, text=True, cwd=workspace_root)
-        
+
+        # Always print subprocess output for debugging
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
         if result.returncode != 0:
             print(f"Preprocessing failed with return code {result.returncode}")
-            print(f"STDOUT: {result.stdout}")
-            print(f"STDERR: {result.stderr}")
             return False
-        
+
         print("Preprocessing completed successfully")
         return True
-        
+
     except Exception as e:
         print(f"Error running preprocessing: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def run_dynotears(data_file, result_dir, input_basename):
@@ -129,7 +135,8 @@ def run_dynotears(data_file, result_dir, input_basename):
 
     # Select script based on USE_TUCKER_CAM flag
     if use_tucker:
-        dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_tucker_cam.py"
+        # Use restart wrapper to prevent memory accumulation
+        dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_tucker_cam_restart.py"
     else:
         dynotears_script = Path(__file__).parent / "final_pipeline" / "dbn_dynotears_fixed_lambda.py"
 
@@ -146,10 +153,14 @@ def run_dynotears(data_file, result_dir, input_basename):
             sys.executable, str(dynotears_script)
         ], env=env_vars, capture_output=True, text=True, cwd=workspace_root)
 
+        # Always print subprocess output for debugging
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
         if result.returncode != 0:
             print(f"{method_name} failed with return code {result.returncode}")
-            print(f"STDOUT: {result.stdout}")
-            print(f"STDERR: {result.stderr}")
             return False
 
         print(f"{method_name} analysis completed successfully")
@@ -157,6 +168,8 @@ def run_dynotears(data_file, result_dir, input_basename):
 
     except Exception as e:
         print(f"Error running {method_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def run_pipeline(data_file, output_dir=None, resume=True, skip_steps=None):
