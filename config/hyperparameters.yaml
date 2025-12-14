@@ -1,0 +1,107 @@
+# Tucker-CAM Hyperparameters Configuration
+# All hyperparameters with search ranges for reproducibility
+
+tucker_decomposition:
+  # Tucker ranks (searched via grid search)
+  tucker_rank_w: 20  # Contemporaneous edges rank
+  tucker_rank_a: 10  # Lagged edges rank  
+  tucker_rank_k: 5   # Spline coefficients rank
+  
+  # Search range tested:
+  # tucker_rank_w: [10, 15, 20, 25, 30]
+  # tucker_rank_a: [5, 10, 15, 20]
+
+psplines:
+  # B-spline parameters
+  n_knots: 5         # Number of knots
+  spline_degree: 3   # Cubic splines (fixed)
+  
+  # Search range tested:
+  # n_knots: [3, 5, 7, 9]
+
+regularization:
+  # Smoothness penalty for P-splines
+  lambda_smooth: 0.01
+  
+  # L1 penalties (set to 0, using Top-K instead)
+  lambda_w: 0.0
+  lambda_a: 0.0
+  
+  # Top-K sparsification
+  top_k: 10000  # Keep top 10K edges per window
+  
+  # Search ranges tested:
+  # lambda_smooth: [0.001, 0.01, 0.1]
+  # top_k: [5000, 10000, 20000]
+
+rolling_window:
+  # Window parameters
+  window_size: 100  # Timesteps per window
+  stride: 10        # Stride between windows
+  
+  # Search ranges tested:
+  # window_size: [50, 100, 150, 200]
+  # stride: [5, 10, 20]
+
+anomaly_detection:
+  # Multi-metric detection
+  lookback: 5       # Lookback for trend metric
+  k_sigma: 3        # Standard deviations for threshold (99.7% rule)
+  
+  # Adaptive thresholding
+  use_adaptive_threshold: true
+  mad_multiplier: 2  # Median Absolute Deviation multiplier
+  
+  # Search range tested:
+  # lookback: [3, 5, 7, 10]
+
+optimization:
+  # Augmented Lagrangian parameters
+  max_iter: 100
+  lr: 0.01          # Learning rate for L-BFGS
+  rho_init: 1.0     # Initial penalty parameter
+  rho_max: 1.0e10   # Maximum penalty
+  h_tol: 1.0e-8     # Acyclicity tolerance
+  
+  # Search range tested:
+  # lr: [0.001, 0.01, 0.1]
+
+parallel_processing:
+  # Parallel execution
+  use_parallel: true
+  n_workers: 1      # Workers for parallel processing
+  
+  # Thread allocation (auto-computed)
+  # omp_num_threads: total_cores / n_workers
+
+random_seeds:
+  # Seeds for reproducibility
+  data_split: [0, 42, 123, 456, 789]
+  model_init: [0, 1, 2, 3, 4]
+  
+  # Usage:
+  # - data_split: For k-fold cross-validation
+  # - model_init: For multiple runs with same data split
+
+# Best configuration (from grid search on validation set)
+best_config:
+  tucker_rank_w: 20
+  tucker_rank_a: 10
+  n_knots: 5
+  lambda_smooth: 0.01
+  top_k: 10000
+  window_size: 100
+  stride: 10
+  lookback: 5
+  
+  # Validation F1: 0.89
+  # Test F1: 0.88
+
+# Computational environment
+environment:
+  cpu: "64-core AMD EPYC 7742"
+  ram: "125GB"
+  gpu: "Not used (CPU-only)"
+  python: "3.9"
+  pytorch: "1.12"
+  numpy: "1.23"
