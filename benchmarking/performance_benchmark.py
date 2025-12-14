@@ -26,7 +26,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler('benchmark_results.log'),
+        logging.FileHandler('logs/benchmark_results.log'),
         logging.StreamHandler()
     ]
 )

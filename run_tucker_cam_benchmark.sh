@@ -1,19 +1,33 @@
 #!/bin/bash
 #
-# Tucker-CAM Benchmark Pipeline (Simplified)
+# Tucker-CAM Benchmark Pipeline (Sequential Mode)
 #
 # Processes two datasets:
-#   1. Golden baseline (4,308 timesteps, normal operation)
-#   2. Full test timeline (8,640 timesteps, all 105 anomalies)
+#   1. Golden baseline (4,308 timesteps, normal operation) - 421 windows
+#   2. Full test timeline (8,640 timesteps, all 105 anomalies) - 842 windows
 #
 # Uses Tucker-decomposed Fast CAM-DAG for memory-efficient nonlinear causal discovery
-# Runtime: ~3 hours (20 min × 2 runs)
+# Runtime: ~126 hours (~5.25 days) in sequential mode
+#
+# Usage: bash run_tucker_cam_benchmark.sh
+# Monitor: tail -f full_benchmark.log
 #
 
 set -e
 
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$WORKSPACE_DIR"
+
+# Redirect all output to log file AND console
+exec > >(tee -a full_benchmark.log)
+exec 2>&1
+
+echo "================================================================================"
+echo "STARTING TUCKER-CAM BENCHMARK: $(date)"
+echo "================================================================================"
+echo "Log file: $WORKSPACE_DIR/full_benchmark.log"
+echo "Monitor: tail -f full_benchmark.log"
+echo ""
 
 # Use venv Python if available
 if [ -f "${HOME}/.venv/bin/python3" ]; then
@@ -26,6 +40,11 @@ fi
 # Tucker-CAM Configuration
 # ============================================================================
 export USE_TUCKER_CAM=true
+export USE_PARALLEL=true       # Parallel with 1 worker = fresh process per window (clean memory)
+export N_WORKERS=1             # Single worker prevents memory issues while keeping clean isolation
+
+# PyTorch memory allocator configuration to reduce fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Tucker ranks (memory/expressiveness tradeoff)
 export TUCKER_RANK_W=20        # Contemporaneous edges (higher = more expressive)
@@ -115,42 +134,114 @@ echo "Log:    $GOLDEN_LOG"
 echo ""
 
 # Preprocessing
-echo "  [1/2] Preprocessing..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [1/2] Preprocessing - STARTING"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Input: $GOLDEN_INPUT"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Output: $GOLDEN_OUTPUT"
 export INPUT_CSV_FILE="$GOLDEN_INPUT"
 export RESULT_DIR="$GOLDEN_OUTPUT"
 
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Executing preprocessing script..."
 $PYTHON executable/final_pipeline/preprocessing_no_mi.py > "$GOLDEN_LOG" 2>&1
+PREPROC_EXIT=$?
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Preprocessing failed! Check log: $GOLDEN_LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Preprocessing exit code: $PREPROC_EXIT"
+if [ $PREPROC_EXIT -ne 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Preprocessing FAILED! Check log: $GOLDEN_LOG"
     exit 1
 fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Preprocessing completed successfully"
 
-# Move preprocessing outputs
+# Move preprocessing outputs (both CSV and NPY formats)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Organizing preprocessing outputs..."
 mkdir -p "${GOLDEN_OUTPUT}/preprocessing"
 mv "${GOLDEN_OUTPUT}"/*_differenced_stationary_series.csv "${GOLDEN_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${GOLDEN_OUTPUT}"/*_differenced_stationary_series.npy "${GOLDEN_OUTPUT}/preprocessing/" 2>/dev/null || true
 mv "${GOLDEN_OUTPUT}"/*_optimal_lags.csv "${GOLDEN_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${GOLDEN_OUTPUT}"/*_optimal_lags.npy "${GOLDEN_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${GOLDEN_OUTPUT}"/*_columns.npy "${GOLDEN_OUTPUT}/preprocessing/" 2>/dev/null || true
 
-PREPROC_SIZE=$(du -h "${GOLDEN_OUTPUT}/preprocessing/"*_differenced*.csv 2>/dev/null | cut -f1)
-echo "  ✓ Preprocessing complete ($PREPROC_SIZE)"
+PREPROC_SIZE=$(du -h "${GOLDEN_OUTPUT}/preprocessing/"*_differenced*.npy 2>/dev/null | cut -f1)
+if [ -z "$PREPROC_SIZE" ]; then
+    PREPROC_SIZE=$(du -h "${GOLDEN_OUTPUT}/preprocessing/"*_differenced*.csv 2>/dev/null | cut -f1)
+fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Preprocessing complete ($PREPROC_SIZE)"
 
 # Tucker-CAM
-echo "  [2/2] Running Tucker-CAM..."
-$PYTHON executable/launcher.py --skip-steps preprocessing >> "$GOLDEN_LOG" 2>&1
+if [ "$USE_PARALLEL" = "true" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [2/2] Running Tucker-CAM (PARALLEL mode with ${N_WORKERS} workers)"
+    MODE_MSG="Parallel with ${N_WORKERS} workers"
+else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [2/2] Running Tucker-CAM (sequential mode)"
+    MODE_MSG="Sequential"
+fi
+TUCKER_START=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Tucker-CAM STARTING"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Mode: $MODE_MSG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Command: $PYTHON executable/launcher.py --skip-steps preprocessing"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Logging to: $GOLDEN_LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Estimated time: ~42 hours for 421 windows (~6 min/window)"
+echo ""
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Tucker-CAM failed! Check log: $GOLDEN_LOG"
+$PYTHON executable/launcher.py --skip-steps preprocessing >> "$GOLDEN_LOG" 2>&1
+TUCKER_EXIT_CODE=$?
+TUCKER_END=$(date +%s)
+TUCKER_DURATION=$((TUCKER_END - TUCKER_START))
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Tucker-CAM FINISHED"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Elapsed time: ${TUCKER_DURATION}s (~$((TUCKER_DURATION / 60)) minutes)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Exit code: $TUCKER_EXIT_CODE"
+
+if [ $TUCKER_EXIT_CODE -ne 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Tucker-CAM FAILED with exit code $TUCKER_EXIT_CODE!"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Last 30 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -30 "$GOLDEN_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
-# Verify output
-if [ -f "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" ]; then
+# Check what files were created
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Checking output directories..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Results dir: ${GOLDEN_OUTPUT}"
+
+# Verify output - check for NPY (parallel) or CSV (sequential) format
+if [ -f "${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy" ]; then
+    WEIGHTS_FILE="${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy"
+    WEIGHTS_SIZE=$(du -h "$WEIGHTS_FILE" | cut -f1)
+    # Count edges from NPY file
+    NUM_EDGES=$($PYTHON -c "import numpy as np; edges=np.load('${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy', allow_pickle=True); print(len(edges) if edges.ndim > 0 else 0)" 2>/dev/null || echo "unknown")
+    echo "  ✓ Tucker-CAM complete (NPY format)"
+    echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
+    if [ -f "${GOLDEN_OUTPUT}/causal_discovery/progress.txt" ]; then
+        echo "    → Progress: $(cat ${GOLDEN_OUTPUT}/causal_discovery/progress.txt)"
+    fi
+    
+    # Convert NPY to enhanced CSV for backward compatibility (optional)
+    echo "  [3/3] Converting to enhanced CSV format (for legacy tools)..."
+    mkdir -p "${GOLDEN_OUTPUT}/weights"
+    $PYTHON executable/convert_npy_to_enhanced_csv.py \
+        "${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy" \
+        "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        ENHANCED_SIZE=$(du -h "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
+        echo "  ✓ Enhanced CSV created: $ENHANCED_SIZE (legacy format)"
+    else
+        echo "  ⓘ CSV conversion skipped (NPY format is primary)"
+    fi
+elif [ -f "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" ]; then
     WEIGHTS_SIZE=$(du -h "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
     NUM_EDGES=$(tail -n +2 "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" | wc -l)
-    echo "  ✓ Tucker-CAM complete"
+    echo "  ✓ Tucker-CAM complete (CSV format)"
     echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 else
-    echo "  ✗ Weights file not found!"
+    echo "  ✗ Weights file not found at expected location!"
+    echo "    → Expected (NPY): ${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy"
+    echo "    → Expected (CSV): ${GOLDEN_OUTPUT}/weights/weights_enhanced.csv"
+    echo "    → Last 50 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -50 "$GOLDEN_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
@@ -179,42 +270,104 @@ echo "Log:    $TEST_LOG"
 echo ""
 
 # Preprocessing
-echo "  [1/2] Preprocessing..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [1/2] Preprocessing - STARTING"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Input: $TEST_INPUT"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Output: $TEST_OUTPUT"
 export INPUT_CSV_FILE="$TEST_INPUT"
 export RESULT_DIR="$TEST_OUTPUT"
 
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Executing preprocessing script..."
 $PYTHON executable/final_pipeline/preprocessing_no_mi.py > "$TEST_LOG" 2>&1
+PREPROC_EXIT=$?
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Preprocessing failed! Check log: $TEST_LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Preprocessing exit code: $PREPROC_EXIT"
+if [ $PREPROC_EXIT -ne 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Preprocessing FAILED! Check log: $TEST_LOG"
     exit 1
 fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Preprocessing completed successfully"
 
-# Move preprocessing outputs
+# Move preprocessing outputs (both CSV and NPY formats)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Organizing preprocessing outputs..."
 mkdir -p "${TEST_OUTPUT}/preprocessing"
 mv "${TEST_OUTPUT}"/*_differenced_stationary_series.csv "${TEST_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${TEST_OUTPUT}"/*_differenced_stationary_series.npy "${TEST_OUTPUT}/preprocessing/" 2>/dev/null || true
 mv "${TEST_OUTPUT}"/*_optimal_lags.csv "${TEST_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${TEST_OUTPUT}"/*_optimal_lags.npy "${TEST_OUTPUT}/preprocessing/" 2>/dev/null || true
+mv "${TEST_OUTPUT}"/*_columns.npy "${TEST_OUTPUT}/preprocessing/" 2>/dev/null || true
 
-PREPROC_SIZE=$(du -h "${TEST_OUTPUT}/preprocessing/"*_differenced*.csv 2>/dev/null | cut -f1)
-echo "  ✓ Preprocessing complete ($PREPROC_SIZE)"
+PREPROC_SIZE=$(du -h "${TEST_OUTPUT}/preprocessing/"*_differenced*.npy 2>/dev/null | cut -f1)
+if [ -z "$PREPROC_SIZE" ]; then
+    PREPROC_SIZE=$(du -h "${TEST_OUTPUT}/preprocessing/"*_differenced*.csv 2>/dev/null | cut -f1)
+fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Preprocessing complete ($PREPROC_SIZE)"
 
 # Tucker-CAM
-echo "  [2/2] Running Tucker-CAM..."
-$PYTHON executable/launcher.py --skip-steps preprocessing >> "$TEST_LOG" 2>&1
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [2/2] Running Tucker-CAM - STARTING"
+TUCKER_START=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Command: $PYTHON executable/launcher.py --skip-steps preprocessing"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Logging to: $TEST_LOG"
 
-if [ $? -ne 0 ]; then
-    echo "  ✗ Tucker-CAM failed! Check log: $TEST_LOG"
+$PYTHON executable/launcher.py --skip-steps preprocessing >> "$TEST_LOG" 2>&1
+TUCKER_EXIT_CODE=$?
+TUCKER_END=$(date +%s)
+TUCKER_DURATION=$((TUCKER_END - TUCKER_START))
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Tucker-CAM FINISHED"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Elapsed time: ${TUCKER_DURATION}s (~$((TUCKER_DURATION / 60)) minutes)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Exit code: $TUCKER_EXIT_CODE"
+
+if [ $TUCKER_EXIT_CODE -ne 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Tucker-CAM FAILED with exit code $TUCKER_EXIT_CODE!"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Last 30 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -30 "$TEST_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
-# Verify output
-if [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
+# Check what files were created
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Checking output directories..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Results dir: ${TEST_OUTPUT}"
+
+# Verify output - check for NPY (parallel) or CSV (sequential) format
+if [ -f "${TEST_OUTPUT}/causal_discovery/window_edges.npy" ]; then
+    WEIGHTS_FILE="${TEST_OUTPUT}/causal_discovery/window_edges.npy"
+    WEIGHTS_SIZE=$(du -h "$WEIGHTS_FILE" | cut -f1)
+    # Count edges from NPY file
+    NUM_EDGES=$($PYTHON -c "import numpy as np; edges=np.load('${TEST_OUTPUT}/causal_discovery/window_edges.npy', allow_pickle=True); print(len(edges) if edges.ndim > 0 else 0)" 2>/dev/null || echo "unknown")
+    echo "  ✓ Tucker-CAM complete (NPY format)"
+    echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
+    if [ -f "${TEST_OUTPUT}/causal_discovery/progress.txt" ]; then
+        echo "    → Progress: $(cat ${TEST_OUTPUT}/causal_discovery/progress.txt)"
+    fi
+    
+    # Convert NPY to enhanced CSV for backward compatibility (optional)
+    echo "  [3/3] Converting to enhanced CSV format (for legacy tools)..."
+    mkdir -p "${TEST_OUTPUT}/weights"
+    $PYTHON executable/convert_npy_to_enhanced_csv.py \
+        "${TEST_OUTPUT}/causal_discovery/window_edges.npy" \
+        "${TEST_OUTPUT}/weights/weights_enhanced.csv" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        ENHANCED_SIZE=$(du -h "${TEST_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
+        echo "  ✓ Enhanced CSV created: $ENHANCED_SIZE (legacy format)"
+    else
+        echo "  ⓘ CSV conversion skipped (NPY format is primary)"
+    fi
+elif [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
     WEIGHTS_SIZE=$(du -h "${TEST_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
     NUM_EDGES=$(tail -n +2 "${TEST_OUTPUT}/weights/weights_enhanced.csv" | wc -l)
-    echo "  ✓ Tucker-CAM complete"
+    echo "  ✓ Tucker-CAM complete (CSV format)"
     echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 else
-    echo "  ✗ Weights file not found!"
+    echo "  ✗ Weights file not found at expected location!"
+    echo "    → Expected (NPY): ${TEST_OUTPUT}/causal_discovery/window_edges.npy"
+    echo "    → Expected (CSV): ${TEST_OUTPUT}/weights/weights_enhanced.csv"
+    echo "    → Last 50 lines of log:"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    tail -50 "$TEST_LOG" | sed 's/^/    /'
+    echo "  ──────────────────────────────────────────────────────────────────"
     exit 1
 fi
 
@@ -225,31 +378,114 @@ echo "✓ Test timeline complete in ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 6
 echo ""
 
 # ============================================================================
+# STAGE 3: Dual-Metric Anomaly Detection
+# ============================================================================
+echo "[STAGE 3/3] Dual-Metric Anomaly Detection"
+echo "────────────────────────────────────────────────────────────────────────────────"
+echo ""
+
+ANOMALY_OUTPUT="results/anomaly_detection"
+ANOMALY_LOG="logs/anomaly_detection.log"
+
+mkdir -p "$ANOMALY_OUTPUT" "$(dirname "$ANOMALY_LOG")"
+
+# Use NPY files directly if available (faster), fallback to CSV
+if [ -f "results/golden_baseline/causal_discovery/window_edges.npy" ]; then
+    GOLDEN_WEIGHTS="results/golden_baseline/causal_discovery/window_edges.npy"
+else
+    GOLDEN_WEIGHTS="results/golden_baseline/weights/weights_enhanced.csv"
+fi
+
+if [ -f "results/test_timeline/causal_discovery/window_edges.npy" ]; then
+    TEST_WEIGHTS="results/test_timeline/causal_discovery/window_edges.npy"
+else
+    TEST_WEIGHTS="results/test_timeline/weights/weights_enhanced.csv"
+fi
+
+echo "Golden baseline: $GOLDEN_WEIGHTS"
+echo "Test timeline:   $TEST_WEIGHTS"
+echo "Output:          $ANOMALY_OUTPUT"
+echo "Log:             $ANOMALY_LOG"
+echo ""
+
+# Run dual-metric anomaly detection
+echo "  Running dual-metric detection..."
+$PYTHON executable/dual_metric_anomaly_detection.py \
+    --golden "$GOLDEN_WEIGHTS" \
+    --test "$TEST_WEIGHTS" \
+    --output "$ANOMALY_OUTPUT/anomaly_detection_results.csv" \
+    --metric frobenius \
+    --lookback 5 \
+    --lag 0 > "$ANOMALY_LOG" 2>&1
+
+if [ $? -ne 0 ]; then
+    echo "  ✗ Anomaly detection failed! Check log: $ANOMALY_LOG"
+    echo ""
+    echo "  This is not critical - the weights are still available for manual analysis."
+    echo "  You can run anomaly detection separately later."
+    echo ""
+else
+    # Verify output
+    if [ -f "$ANOMALY_OUTPUT/anomaly_detection_results.csv" ]; then
+        RESULTS_SIZE=$(du -h "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | cut -f1)
+        NUM_ANOMALIES=$(grep -v "NORMAL" "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | tail -n +2 | wc -l)
+        TOTAL_WINDOWS=$(tail -n +2 "$ANOMALY_OUTPUT/anomaly_detection_results.csv" | wc -l)
+        echo "  ✓ Anomaly detection complete"
+        echo "    → Results: $RESULTS_SIZE ($NUM_ANOMALIES anomalies in $TOTAL_WINDOWS windows)"
+
+        # Show detection summary
+        echo ""
+        echo "  Detection Summary:"
+        echo "  ──────────────────────────────────────────────────────────────────"
+        tail -n 20 "$ANOMALY_LOG" | grep -E "NORMAL|NEW_ANOMALY_ONSET|RECOVERY_FLUCTUATION|CASCADE_OR_PERSISTENT|windows" || true
+        echo "  ──────────────────────────────────────────────────────────────────"
+    else
+        echo "  ✗ Results file not created!"
+    fi
+fi
+
+STAGE3_TIME=$(date +%s)
+STAGE3_DURATION=$((STAGE3_TIME - STAGE2_TIME))
+echo ""
+echo "✓ Anomaly detection complete in ${STAGE3_DURATION}s"
+echo ""
+
+# ============================================================================
 # Final Summary
 # ============================================================================
 END_TIME=$(date +%s)
 TOTAL_DURATION=$((END_TIME - START_TIME))
 
 echo "================================================================================"
-echo "PIPELINE COMPLETE!"
+echo "TUCKER-CAM BENCHMARK COMPLETE!"
 echo "================================================================================"
 echo ""
 echo "Stage Summary:"
-echo "  [0/2] Dataset preparation: ${STAGE0_DURATION}s"
-echo "  [1/2] Golden baseline:     ${STAGE1_DURATION}s (~$((STAGE1_DURATION / 60)) min)"
-echo "  [2/2] Test timeline:       ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 60)) min)"
+echo "  [0/3] Dataset preparation:     ${STAGE0_DURATION}s"
+echo "  [1/3] Golden baseline:         ${STAGE1_DURATION}s (~$((STAGE1_DURATION / 60)) min)"
+echo "  [2/3] Test timeline:           ${STAGE2_DURATION}s (~$((STAGE2_DURATION / 60)) min)"
+echo "  [3/3] Anomaly detection:       ${STAGE3_DURATION}s"
 echo ""
 echo "Total runtime: $((TOTAL_DURATION / 3600))h $((TOTAL_DURATION % 3600 / 60))m $((TOTAL_DURATION % 60))s"
 echo ""
 echo "Output locations:"
-echo "  Golden:  results/golden_baseline/weights/weights_enhanced.csv"
-echo "  Test:    results/test_timeline/weights/weights_enhanced.csv"
+echo "  Golden weights (NPY):  results/golden_baseline/causal_discovery/window_edges.npy"
+echo "  Golden weights (CSV):  results/golden_baseline/weights/weights_enhanced.csv"
+echo "  Test weights (NPY):    results/test_timeline/causal_discovery/window_edges.npy"
+echo "  Test weights (CSV):    results/test_timeline/weights/weights_enhanced.csv"
+echo "  Anomaly results:       results/anomaly_detection/anomaly_detection_results.csv"
+echo ""
+echo "Logs:"
+echo "  Golden baseline:   logs/golden_baseline.log"
+echo "  Test timeline:     logs/test_timeline.log"
+echo "  Anomaly detection: logs/anomaly_detection.log"
 echo ""
 echo "================================================================================"
 echo "Next steps:"
-echo "  1. Apply dual-metric anomaly detection (see todolist.md)"
-echo "  2. Evaluate against labeled anomalies"
-echo "  3. Compare with LSTM baseline (Hundman 2018)"
+echo "  1. Review anomaly detection results in results/anomaly_detection/"
+echo "  2. Evaluate against labeled anomalies (telemanom/labeled_anomalies.csv)"
+echo "  3. Compare with LSTM baseline (Hundman et al. 2018)"
+echo "  4. Perform root cause analysis on detected anomalies"
 echo "================================================================================"
 echo ""
 

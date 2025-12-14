@@ -623,3 +623,94 @@ def _create_root_cause_summary(edge_analysis: Dict, node_analysis: Dict,
     }
 
     return summary
+
+
+def main():
+    """Main entry point."""
+    import argparse
+    import json
+    from pathlib import Path
+    import pandas as pd
+    import sys
+    import logging
+
+    parser = argparse.ArgumentParser(
+        description='Root Cause Analysis for Causal Anomalies',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument('--baseline', required=True, help='Baseline weights (Golden) CSV')
+    parser.add_argument('--current', required=True, help='Current weights (Anomaly) CSV')
+    parser.add_argument('--output', required=True, help='Output JSON file for results')
+    parser.add_argument('--top-k', type=int, default=10, help='Number of top edge changes to analyze')
+    parser.add_argument('--window-idx', type=int, default=None, help='Current window index (optional)')
+    parser.add_argument('--lag', type=int, default=0, help='Lag to analyze')
+
+    args = parser.parse_args()
+
+    # Load weights
+    try:
+        # Helper to load and reshape 
+        def load_matrix(csv_path, win_idx=None, lag=0):
+            df = pd.read_csv(csv_path)
+            if win_idx is not None:
+                df = df[df['window_idx'] == win_idx]
+            
+            df = df[df['lag'] == lag]
+            
+            if df.empty:
+                raise ValueError(f"No weights found in {csv_path} for window={win_idx}, lag={lag}")
+                
+            max_i = int(df['i'].max())
+            max_j = int(df['j'].max())
+            d = max(max_i, max_j) + 1
+            
+            W = np.zeros((d, d))
+            for _, row in df.iterrows():
+                i, j = int(row['i']), int(row['j'])
+                W[i, j] = float(row['weight'])
+            return W, d
+
+        # Load baseline (Golden is usually averaged or single representative)
+        # If baseline CSV has multiple windows, which one to use? 
+        # Usually we pass a SPECIFIC window file or we average the CSV.
+        # For simplicity, let's assume the CSV passed is pre-filtered or we use the first window found.
+        W_base, d_base = load_matrix(args.baseline, lag=args.lag)
+        
+        # Load current
+        W_curr, d_curr = load_matrix(args.current, win_idx=args.window_idx, lag=args.lag)
+        
+        # Ensure dimensions match
+        d = max(d_base, d_curr)
+        if d_base < d: W_base = np.pad(W_base, ((0, d-d_base), (0, d-d_base)))
+        if d_curr < d: W_curr = np.pad(W_curr, ((0, d-d_curr), (0, d-d_curr)))
+
+        # Run Analysis
+        results = perform_root_cause_analysis(
+            W_base, W_curr, 
+            variable_names=[f"Var_{i}" for i in range(d)],
+            top_k_edges=args.top_k
+        )
+
+        # Save results
+        class NpEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.integer): return int(obj)
+                if isinstance(obj, np.floating): return float(obj)
+                if isinstance(obj, np.ndarray): return obj.tolist()
+                return super(NpEncoder, self).default(obj)
+
+        with open(args.output, 'w') as f:
+            json.dump(results, f, indent=4, cls=NpEncoder)
+            
+        logger.info(f"RCA results saved to {args.output}")
+        return 0
+
+    except Exception as e:
+        logger.error(f"RCA Failed: {e}")
+        return 1
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    sys.exit(main())

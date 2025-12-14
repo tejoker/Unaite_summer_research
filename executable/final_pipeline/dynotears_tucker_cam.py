@@ -12,11 +12,17 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-from typing import List, Union
+from typing import List, Union, Tuple
 import logging
 
 from cam_model_tucker import TuckerCAMModel
-from structuremodel import StructureModel
+
+# Try to import NVIDIA Apex FusedAdam for 5-7% speedup
+try:
+    from apex.optimizers import FusedAdam
+    FUSED_ADAM_AVAILABLE = True
+except ImportError:
+    FUSED_ADAM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,8 @@ class TuckerFastCAMDAG:
         lambda_w: float = 0.0,
         lambda_a: float = 0.0,
         lambda_smooth: float = 0.01,
+        lambda_core: float = 0.01,
+        lambda_orth: float = 0.001,
         device='cuda'
     ):
         """
@@ -53,6 +61,8 @@ class TuckerFastCAMDAG:
             lambda_w: L1 penalty on contemporaneous edges (0 = Option D)
             lambda_a: L1 penalty on lagged edges (0 = Option D)
             lambda_smooth: Smoothness penalty on P-splines
+            lambda_core: Core sparsity penalty (prevents smearing via sparse factor interactions)
+            lambda_orth: Orthogonality penalty (ensures distinct, interpretable factors)
             device: 'cpu' or 'cuda'
         """
         self.d = d
@@ -63,6 +73,8 @@ class TuckerFastCAMDAG:
         self.lambda_w = lambda_w
         self.lambda_a = lambda_a
         self.lambda_smooth = lambda_smooth
+        self.lambda_core = lambda_core
+        self.lambda_orth = lambda_orth
         self.device = device
 
         # Model will be created in fit()
@@ -91,7 +103,7 @@ class TuckerFastCAMDAG:
         max_iter: int = 100,
         lr: float = 0.01,
         rho: float = 1.0,
-        rho_max: float = 1e16,
+        rho_max: float = 1e10,  # Reduced from 1e16 to prevent weight collapse
         h_tol: float = 1e-8,
         verbose: bool = False
     ):
@@ -125,9 +137,31 @@ class TuckerFastCAMDAG:
                 lambda_smooth=self.lambda_smooth,
                 device=self.device
             )
+            # PyTorch 2.0+ JIT compilation
+            # On CPU, 'reduce-overhead' can significantly speed up the small-step training loop
+            if self.device == 'cpu':
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    if verbose:
+                        logger.info("torch.compile() enabled for CPU (mode=reduce-overhead)")
+                except Exception as e:
+                    if verbose:
+                        logger.warning(f"torch.compile() failed on CPU: {e}")
+            elif self.device == 'cuda' and d > 1000:
+                if verbose:
+                    logger.info(f"torch.compile() DISABLED for d={d} (saves 20GB GPU memory)")
+            else:
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    if verbose:
+                        logger.info("torch.compile() enabled (mode=reduce-overhead)")
+                except Exception as e:
+                    if verbose:
+                        logger.warning(f"torch.compile() failed: {e}")
         else:
             if verbose:
-                logger.info("Reusing Tucker-CAM model (parameters reset)")
+                logger.info("Reusing compiled Tucker-CAM model (parameters reset)")
+            # Reset parameters but keep compiled graph
             self.model.reset_parameters()
 
         # 2. Compute B-spline basis matrices
@@ -137,8 +171,22 @@ class TuckerFastCAMDAG:
         B_a = self.model._compute_basis_matrix(X)
         self.model.set_basis_matrices(B_w, B_a)
 
-        # 3. Setup optimizer
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        # 3. Setup optimizer (use NVIDIA FusedAdam for 5-7% speedup if available)
+        if FUSED_ADAM_AVAILABLE and self.device == 'cuda':
+            optimizer = FusedAdam(self.model.parameters(), lr=lr)
+            if verbose:
+                logger.info("Using NVIDIA FusedAdam optimizer (5-7% faster)")
+        else:
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+            if verbose and self.device == 'cuda':
+                logger.info("Using standard Adam optimizer (install apex for FusedAdam speedup)")
+
+        # Mixed precision training
+        use_amp = self.device == 'cuda'
+        scaler = torch.amp.GradScaler('cuda') if use_amp else None
+        
+        # Gradient accumulation disabled to prevent weight collapse
+        accumulation_steps = 1  # Disabled (was 2) - full gradient updates to maintain weight magnitudes
 
         # 4. Augmented Lagrangian parameters
         alpha = torch.zeros(1, device=self.device)  # Lagrange multiplier
@@ -147,52 +195,119 @@ class TuckerFastCAMDAG:
         self.history = {'loss': [], 'h': [], 'rho': []}
 
         if verbose:
-            logger.info(f"Tucker-CAM: n={n}, d={d}, p={self.p}")
+            logger.info(f"Tucker-CAM: n={n}, d={d}, p={self.p}, AMP={'enabled' if use_amp else 'disabled'}")
 
         # 5. Optimization loop
         for iter_num in range(max_iter):
-            optimizer.zero_grad()
+            # Zero gradients only every accumulation_steps iterations
+            if iter_num % accumulation_steps == 0:
+                optimizer.zero_grad()
 
-            # Forward pass
-            pred = self.model.forward(X, Xlags)
+            # Forward pass with mixed precision
+            if use_amp:
+                with torch.amp.autocast('cuda'):
+                    # Forward pass
+                    pred = self.model.forward(X, Xlags)
 
-            # Loss: squared error
-            loss_fit = torch.mean((X - pred) ** 2)
+                    # Loss: squared error
+                    loss_fit = torch.mean((X - pred) ** 2)
 
-            # L1 penalties (Option D: lambda_w=0, lambda_a=0)
-            W_coefs = self.model.get_W_coefs()
-            A_coefs = self.model.get_A_coefs()
-            loss_l1_w = self.lambda_w * torch.sum(torch.abs(W_coefs))
-            loss_l1_a = self.lambda_a * torch.sum(torch.abs(A_coefs))
+                    # L1 penalties (Option D: lambda_w=0, lambda_a=0)
+                    W_coefs = self.model.get_W_coefs()
+                    loss_l1_w = self.lambda_w * torch.sum(torch.abs(W_coefs))
+                    
+                    # Compute A_coefs L1 penalty in chunks to avoid OOM for large d
+                    if self.lambda_a > 0:
+                        loss_l1_a = 0.0
+                        for i_start, i_end, A_chunk in self.model.get_A_coefs_chunked(chunk_size=100):
+                            loss_l1_a += torch.sum(torch.abs(A_chunk))
+                        loss_l1_a *= self.lambda_a
+                    else:
+                        loss_l1_a = 0.0  # Skip computation if lambda_a=0
 
-            # Smoothness penalty
-            loss_smooth = self.model.compute_smoothness_penalty()
+                    # Smoothness penalty
+                    loss_smooth = self.model.compute_smoothness_penalty()
+                    
+                    # Core sparsity penalty (prevents smearing)
+                    loss_core = self.lambda_core * self.model.compute_core_sparsity_penalty()
+                    
+                    # Orthogonality penalty (distinct factors)
+                    loss_orth = self.lambda_orth * self.model.compute_orthogonality_penalty()
 
-            # Acyclicity constraint: h(W) = tr(e^(W◦W)) - d
-            W = self.model.get_weight_matrix()  # (d, d)
-            W_squared = W * W
-            h = torch.trace(torch.matrix_exp(W_squared)) - d
+                    # Acyclicity constraint: h(W) = tr(e^(W◦W)) - d
+                    W = self.model.get_weight_matrix()  # (d, d)
+                    W_squared = W * W
+                    h = torch.trace(torch.matrix_exp(W_squared)) - d
 
-            # Augmented Lagrangian
-            loss_total = (loss_fit + loss_l1_w + loss_l1_a + loss_smooth +
-                         alpha * h + 0.5 * rho_current * h * h)
+                    # Augmented Lagrangian (divide by accumulation_steps for averaging)
+                    loss_total = (loss_fit + loss_l1_w + loss_l1_a + loss_smooth + 
+                                 loss_core + loss_orth +
+                                 alpha * h + 0.5 * rho_current * h * h) / accumulation_steps
 
-            # Backward pass
-            loss_total.backward()
-
-            # Update Tucker factors via gradient descent
-            optimizer.step()
+                # Backward pass with gradient scaling (accumulate gradients)
+                scaler.scale(loss_total).backward()
+                
+                # Step optimizer only every accumulation_steps iterations
+                if (iter_num + 1) % accumulation_steps == 0 or (iter_num + 1) == max_iter:
+                    scaler.step(optimizer)
+                    scaler.update()
+            else:
+                # Standard precision (CPU or no AMP)
+                pred = self.model.forward(X, Xlags)
+                loss_fit = torch.mean((X - pred) ** 2)
+                W_coefs = self.model.get_W_coefs()
+                loss_l1_w = self.lambda_w * torch.sum(torch.abs(W_coefs))
+                
+                # Compute A_coefs L1 penalty in chunks to avoid OOM for large d
+                if self.lambda_a > 0:
+                    loss_l1_a = 0.0
+                    for i_start, i_end, A_chunk in self.model.get_A_coefs_chunked(chunk_size=100):
+                        loss_l1_a += torch.sum(torch.abs(A_chunk))
+                    loss_l1_a *= self.lambda_a
+                else:
+                    loss_l1_a = 0.0  # Skip computation if lambda_a=0
+                
+                loss_smooth = self.model.compute_smoothness_penalty()
+                
+                # Core sparsity penalty (prevents smearing)
+                loss_core = self.lambda_core * self.model.compute_core_sparsity_penalty()
+                
+                # Orthogonality penalty (distinct factors)
+                loss_orth = self.lambda_orth * self.model.compute_orthogonality_penalty()
+                
+                W = self.model.get_weight_matrix()
+                W_squared = W * W
+                h = torch.trace(torch.matrix_exp(W_squared)) - d
+                loss_total = (loss_fit + loss_l1_w + loss_l1_a + loss_smooth + 
+                             loss_core + loss_orth +
+                             alpha * h + 0.5 * rho_current * h * h) / accumulation_steps
+                loss_total.backward()
+                
+                # Step optimizer only every accumulation_steps iterations
+                if (iter_num + 1) % accumulation_steps == 0 or (iter_num + 1) == max_iter:
+                    optimizer.step()
 
             # Track history
             self.history['loss'].append(loss_total.item())
             self.history['h'].append(h.item())
             self.history['rho'].append(rho_current)
 
-            # Check convergence
+            # Early stopping: check convergence
+            # 1. DAG constraint satisfied
             if abs(h.item()) <= h_tol:
                 if verbose:
-                    logger.info(f"  Iter {iter_num}: h={h.item():.2e} (converged!)")
+                    logger.info(f"  Iter {iter_num}: h={h.item():.2e} (DAG constraint satisfied)")
                 break
+
+            # 2. Loss plateau (improved early stopping for speed)
+            if iter_num >= 3:  # Check after just 3 iterations (was 5)
+                recent_losses = self.history['loss'][-3:]  # Last 3 losses
+                loss_changes = [abs(recent_losses[i] - recent_losses[i-1]) / (abs(recent_losses[i-1]) + 1e-8)
+                               for i in range(1, len(recent_losses))]
+                if all(change < 5e-4 for change in loss_changes):  # Relaxed from 1e-4 to 5e-4 (0.05%)
+                    if verbose:
+                        logger.info(f"  Iter {iter_num}: Loss converged (plateau detected, changes < 0.05%)")
+                    break
 
             # Update Lagrangian parameters
             if h.item() > 0.25 * self.history['h'][max(0, iter_num-1)]:
@@ -213,16 +328,16 @@ class TuckerFastCAMDAG:
         self,
         var_names: List[str],
         w_threshold: float = 0.01
-    ) -> StructureModel:
+    ) -> List[Tuple]:
         """
-        Convert learned Tucker-CAM to StructureModel with GPU-accelerated edge extraction.
+        Convert learned Tucker-CAM to edge list (vectorized - no NetworkX overhead).
 
         Args:
             var_names: Variable names
             w_threshold: Threshold for edge pruning (keep edges with |weight| > threshold)
 
         Returns:
-            StructureModel with edges
+            List of edges as tuples: (parent, child, {'weight': w, 'lag': l})
         """
         if self.model is None:
             raise ValueError("Model not fitted yet. Call fit() first.")
@@ -230,39 +345,41 @@ class TuckerFastCAMDAG:
         # Get weight matrices
         W, A_lags = self.model.get_all_weight_matrices_gpu()
 
-        # Create StructureModel
-        sm = StructureModel(var_names)
+        # Collect edges in a list (NO NetworkX - massive memory savings!)
+        edges = []
 
-        # Add contemporaneous edges (lag 0)
+        # Add contemporaneous edges (lag 0) - VECTORIZED
         W_np = W.detach().cpu().numpy()
-        for i in range(self.d):
-            for j in range(self.d):
-                weight = W_np[i, j]
-                if abs(weight) > w_threshold and i != j:  # No self-loops
-                    sm.add_edge(
-                        f"{var_names[j]}_lag0",  # parent
-                        f"{var_names[i]}_lag0",  # child
-                        weight=weight,
-                        lag=0
-                    )
+        # Create mask: |weight| > threshold AND not diagonal
+        mask_w = (np.abs(W_np) > w_threshold) & (np.eye(self.d) == 0)
+        # Get indices of non-zero edges (vectorized - avoids 8M loop iterations!)
+        indices_w = np.argwhere(mask_w)
+        for idx in indices_w:
+            i, j = idx
+            edges.append((
+                f"{var_names[j]}_lag0",  # parent
+                f"{var_names[i]}_lag0",  # child
+                {'weight': float(W_np[i, j]), 'lag': 0}
+            ))
 
-        # Add lagged edges (lag 1..p)
+        # Add lagged edges (lag 1..p) - VECTORIZED
         for lag_idx, A_lag in enumerate(A_lags):
             A_np = A_lag.detach().cpu().numpy()
             lag = lag_idx + 1
 
-            for i in range(self.d):
-                for j in range(self.d):
-                    weight = A_np[i, j]
-                    if abs(weight) > w_threshold:
-                        sm.add_edge(
-                            f"{var_names[j]}_lag{lag}",  # parent
-                            f"{var_names[i]}_lag0",      # child
-                            weight=weight,
-                            lag=lag
-                        )
+            # Create mask: |weight| > threshold (vectorized)
+            mask_a = np.abs(A_np) > w_threshold
+            # Get indices of non-zero edges
+            indices_a = np.argwhere(mask_a)
+            for idx in indices_a:
+                i, j = idx
+                edges.append((
+                    f"{var_names[j]}_lag{lag}",  # parent
+                    f"{var_names[i]}_lag0",      # child
+                    {'weight': float(A_np[i, j]), 'lag': lag}
+                ))
 
-        return sm
+        return edges
 
 
 def from_pandas_dynamic_tucker_cam(
@@ -278,10 +395,12 @@ def from_pandas_dynamic_tucker_cam(
     max_iter: int = 100,
     lr: float = 0.01,
     w_threshold: float = 0.01,
+    h_tol: float = 1e-8,
     device: str = 'cuda'
-) -> StructureModel:
+) -> List[Tuple]:
     """
     Learn DBN structure using Tucker-CAM-DAG (memory-efficient nonlinear).
+    Returns edge list instead of NetworkX graph for massive memory savings.
 
     Args:
         time_series: Time series data (single DataFrame or list)
@@ -299,7 +418,8 @@ def from_pandas_dynamic_tucker_cam(
         device: 'cpu' or 'cuda'
 
     Returns:
-        StructureModel with learned DAG
+        List of edges as tuples: (parent, child, {'weight': w, 'lag': l})
+        NO NetworkX overhead - massive memory savings!
     """
     # Handle input
     if isinstance(time_series, pd.DataFrame):
@@ -346,14 +466,39 @@ def from_pandas_dynamic_tucker_cam(
     )
 
     # Fit model
-    model.fit(X, Xlags, max_iter=max_iter, lr=lr, verbose=True)
+    model.fit(X, Xlags, max_iter=max_iter, lr=lr, h_tol=h_tol, verbose=True)
 
-    # Extract structure
-    sm = model.get_structure_model(var_names, w_threshold=w_threshold)
+    # Extract structure as edge list (NO NetworkX - massive memory savings!)
+    edges = model.get_structure_model(var_names, w_threshold=w_threshold)
 
-    logger.info(f"Tucker-CAM: Found {len(sm.edges())} edges")
+    logger.info(f"Tucker-CAM: Found {len(edges)} edges")
 
-    return sm
+    # AGGRESSIVE memory cleanup to prevent accumulation across windows
+    # Delete model and tensors explicitly
+    del X, Xlags
+    if hasattr(model, 'model') and model.model is not None:
+        # Delete Tucker factors and cached matrices
+        if hasattr(model.model, 'W_U1'):
+            del model.model.W_U1, model.model.W_U2, model.model.W_core
+        if hasattr(model.model, 'A_U1'):
+            del model.model.A_U1, model.model.A_U2, model.model.A_U3, model.model.A_U4, model.model.A_core
+        if hasattr(model.model, 'W_mask'):
+            del model.model.W_mask, model.model.A_mask
+        if hasattr(model.model, 'basis_matrices'):
+            del model.model.basis_matrices
+        del model.model
+    del model
+    
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
+    if device == 'cuda':
+        torch.cuda.synchronize()  # Wait for all operations to complete
+        torch.cuda.empty_cache()   # Free cached memory
+        torch.cuda.reset_peak_memory_stats()  # Reset memory tracking
+
+    return edges
 
 
 if __name__ == "__main__":
@@ -391,9 +536,15 @@ if __name__ == "__main__":
         device=device
     )
 
+    # Count edges and nodes from edge list
+    nodes = set()
+    for parent, child, _ in sm:
+        nodes.add(parent)
+        nodes.add(child)
+
     print(f"\nResults:")
-    print(f"  Edges found: {len(sm.edges())}")
-    print(f"  Variables: {len(sm.nodes())}")
+    print(f"  Edges found: {len(sm)}")
+    print(f"  Variables: {len(nodes)}")
 
     print("\n" + "="*70)
     print("✓ Tucker-CAM-DAG test passed!")
