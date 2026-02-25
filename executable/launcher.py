@@ -145,6 +145,8 @@ def run_dynotears(data_file, result_dir, input_basename):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not differenced_file.exists():
         print(f"[{timestamp}] Error: Differenced file not found: {differenced_file}")
+        # DEBUG
+        print(f"DEBUG: ls of {preprocessing_dir}: {list(preprocessing_dir.glob('*'))}")
         return False
     if not columns_file.exists():
         print(f"[{timestamp}] Error: Columns file not found: {columns_file}")
@@ -152,6 +154,8 @@ def run_dynotears(data_file, result_dir, input_basename):
     if not lags_file.exists():
         print(f"[{timestamp}] Error: Lags file not found: {lags_file}")
         return False
+    
+    print(f"[{timestamp}] DEBUG: All input files found at {preprocessing_dir}")
 
     # Environment variables for DynoTEARS/Tucker-CAM - pass through all existing env vars
     env_vars = os.environ.copy()
@@ -161,9 +165,102 @@ def run_dynotears(data_file, result_dir, input_basename):
         'RESULT_DIR': str(result_dir),
         'PYTHONPATH': str(workspace_root / "executable" / "final_pipeline")
     })
+    
+    print(f"[{timestamp}] DEBUG: Env vars prepared", flush=True)
 
-    weights_dir = result_dir / 'causal_discovery'
+    display_output_dir = result_dir / 'weights' # Expected final location for display logic
+    weights_dir = result_dir # Script adds /weights automatically
     pipeline_dir = workspace_root / "executable" / "final_pipeline"
+    
+    print(f"[{timestamp}] DEBUG: Checking pipeline config: TUCKER={use_tucker} PARALLEL={use_parallel}", flush=True)
+    
+    # Select script based on USE_TUCKER_CAM and USE_PARALLEL flags
+    if use_tucker and use_parallel:
+        print(f"[{timestamp}] DEBUG: Selecting parallel script...", flush=True)
+        # Use parallel version for maximum CPU utilization (production)
+        dynotears_script = pipeline_dir / "dbn_dynotears_tucker_cam_parallel.py"
+
+    elif use_tucker:
+        # Sequential Tucker-CAM not supported (archived)
+        # Use parallel with N_WORKERS=1 instead for clean memory isolation
+        print("WARNING: Sequential Tucker-CAM is deprecated. Using parallel mode with 1 worker.")
+        dynotears_script = pipeline_dir / "dbn_dynotears_tucker_cam_parallel.py"
+    else:
+        # Linear SVAR baseline for comparison
+        dynotears_script = pipeline_dir / "dbn_dynotears_fixed_lambda.py"
+
+
+
+    print(f"[{timestamp}] DEBUG: Passed selection logic", flush=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]   Running: python {dynotears_script}", flush=True)
+    print(f"[{timestamp}]   Differenced data: {differenced_file}")
+    print(f"[{timestamp}]   Lags file: {lags_file}")
+    print(f"[{timestamp}]   Output: {weights_dir}")
+
+    # Get workspace root (parent of executable/)
+    workspace_root = Path(__file__).parent.parent
+
+    try:
+        # Build command based on script type
+        # Build command based on script type
+        if use_tucker:
+            # Parallel script is used for both parallel and sequential (deprecated) modes
+            if use_parallel:
+                n_workers = int(os.getenv('N_WORKERS', '2'))
+            else:
+                n_workers = 1
+
+            window_size = int(os.getenv('WINDOW_SIZE', '100'))
+            stride = int(os.getenv('STRIDE', '10'))
+            
+            cmd = [
+                sys.executable, str(dynotears_script),
+                '--data', str(differenced_file),
+                '--columns', str(columns_file),
+                '--lags', str(lags_file),
+                '--output', str(weights_dir),
+                '--window-size', str(window_size),
+                '--stride', str(stride),
+                '--workers', str(n_workers)
+            ]
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{timestamp}]   Parallel workers: {n_workers}")
+        else:
+            # Sequential version uses environment variables
+            cmd = [sys.executable, str(dynotears_script)]
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] DEBUG: Executing command: {' '.join(cmd)}")
+        print(f"[{timestamp}] DEBUG: CWD: {workspace_root}")
+        print(f"[{timestamp}] DEBUG: Env N_WORKERS: {os.environ.get('N_WORKERS')}")
+
+        start_time = time.time()
+        result = subprocess.run(cmd, env=env_vars, capture_output=True, text=True, cwd=workspace_root)
+        elapsed = time.time() - start_time
+        
+        print(f"[{timestamp}] DEBUG: Subprocess completed with return code: {result.returncode}")
+
+        # Always print subprocess output for debugging
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if result.returncode != 0:
+            print(f"[{timestamp}] {method_name} FAILED with return code {result.returncode} (elapsed: {elapsed:.2f}s)")
+            return False
+
+        print(f"[{timestamp}] {method_name} analysis completed successfully (elapsed: {elapsed:.2f}s)")
+        return True
+
+    except Exception as e:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Error running {method_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def check_rca_complete(result_dir):
     """Check if RCA step has been completed"""
@@ -252,76 +349,6 @@ def run_rca(result_dir, input_basename):
 
     except Exception as e:
         print(f"[{timestamp}] Error running RCA: {e}")
-        return False
-    # Select script based on USE_TUCKER_CAM and USE_PARALLEL flags
-    if use_tucker and use_parallel:
-        # Use parallel version for maximum CPU utilization (production)
-        dynotears_script = pipeline_dir / "dbn_dynotears_tucker_cam_parallel.py"
-    elif use_tucker:
-        # Sequential Tucker-CAM not supported (archived)
-        # Use parallel with N_WORKERS=1 instead for clean memory isolation
-        print("WARNING: Sequential Tucker-CAM is deprecated. Using parallel mode with 1 worker.")
-        dynotears_script = pipeline_dir / "dbn_dynotears_tucker_cam_parallel.py"
-    else:
-        # Linear SVAR baseline for comparison
-        dynotears_script = pipeline_dir / "dbn_dynotears_fixed_lambda.py"
-
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}]   Running: python {dynotears_script}")
-    print(f"[{timestamp}]   Differenced data: {differenced_file}")
-    print(f"[{timestamp}]   Lags file: {lags_file}")
-    print(f"[{timestamp}]   Output: {weights_dir}")
-
-    # Get workspace root (parent of executable/)
-    workspace_root = Path(__file__).parent.parent
-
-    try:
-        # Build command based on script type
-        if use_tucker and use_parallel:
-            # Parallel version uses command-line arguments
-            n_workers = int(os.getenv('N_WORKERS', '2'))
-            window_size = int(os.getenv('WINDOW_SIZE', '100'))
-            stride = int(os.getenv('STRIDE', '10'))
-            
-            cmd = [
-                sys.executable, str(dynotears_script),
-                '--data', str(differenced_file),
-                '--columns', str(columns_file),
-                '--lags', str(lags_file),
-                '--output', str(weights_dir),
-                '--window-size', str(window_size),
-                '--stride', str(stride),
-                '--workers', str(n_workers)
-            ]
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}]   Parallel workers: {n_workers}")
-        else:
-            # Sequential version uses environment variables
-            cmd = [sys.executable, str(dynotears_script)]
-
-        start_time = time.time()
-        result = subprocess.run(cmd, env=env_vars, capture_output=True, text=True, cwd=workspace_root)
-        elapsed = time.time() - start_time
-
-        # Always print subprocess output for debugging
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if result.returncode != 0:
-            print(f"[{timestamp}] {method_name} FAILED with return code {result.returncode} (elapsed: {elapsed:.2f}s)")
-            return False
-
-        print(f"[{timestamp}] {method_name} analysis completed successfully (elapsed: {elapsed:.2f}s)")
-        return True
-
-    except Exception as e:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Error running {method_name}: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 def run_pipeline(data_file, output_dir=None, resume=True, skip_steps=None):

@@ -227,9 +227,45 @@ def main():
     logger.info(f"Input lags data: {lags_csv}")
     logger.info(f"Output directory: {result_dir}")
 
-    # Load data
-    df_differenced = pd.read_csv(differenced_csv, index_col=0, parse_dates=True)
-    df_lags = pd.read_csv(lags_csv)
+    # Load data - support both CSV and NPY
+    if differenced_csv.endswith('.npy'):
+        logger.info(f"Loading differenced data from NPY file: {differenced_csv}")
+        data_matrix = np.load(differenced_csv)
+        # Create default index/columns since NPY loses metadata
+        df_differenced = pd.DataFrame(data_matrix)
+    else:
+        df_differenced = pd.read_csv(differenced_csv, index_col=0, parse_dates=True)
+
+    if lags_csv.endswith('.npy'):
+        logger.info(f"Loading lags from NPY file: {lags_csv}")
+        lags_array = np.load(lags_csv, allow_pickle=True)
+        
+        # Check if structured array
+        if lags_array.dtype.names and 'optimal_lag' in lags_array.dtype.names:
+            optimal_lags = lags_array['optimal_lag']
+        else:
+            # Fallback for flat array
+            optimal_lags = lags_array.flatten()
+            
+        df_lags = pd.DataFrame({'optimal_lag': optimal_lags})
+    else:
+        df_lags = pd.read_csv(lags_csv)
+    
+    # -------------------------------------------------------------------------
+    # DEFENSIVE FIX: Force optimal_lag to be numeric to prevent TypeErrors
+    # -------------------------------------------------------------------------
+    if 'optimal_lag' in df_lags.columns:
+        # Step 1: Force numeric (coerces bad values to NaN)
+        df_lags['optimal_lag'] = pd.to_numeric(df_lags['optimal_lag'], errors='coerce')
+        # Step 2: Drop NaNs (if any appeared from coercion)
+        df_lags = df_lags.dropna(subset=['optimal_lag'])
+        # Step 3: Convert to int safely
+        df_lags['optimal_lag'] = df_lags['optimal_lag'].astype(int)
+    else:
+        logger.warning(f"'optimal_lag' column missing in {lags_csv}! Defaulting to p=1.")
+        # Create dummy default
+        df_lags['optimal_lag'] = 1
+    # -------------------------------------------------------------------------
     
     # Adaptive lambda scaling for high-dimensional problems
     n_vars = df_differenced.shape[1]

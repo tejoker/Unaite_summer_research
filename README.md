@@ -1,6 +1,8 @@
 # Temporal Anomaly Detection via Rolling Window Causal Graph Evolution
 
-Detects anomalies in multivariate time series by learning Dynamic Bayesian Networks (DBNs) and tracking structural changes in the causal graph. Uses DynoTEARS for causal discovery and a 4-metric ensemble for anomaly classification.
+Detects anomalies in high-dimensional multivariate time series by learning **Non-Linear Dynamic Bayesian Networks (DBNs)** and tracking structural changes in the causal graph. 
+
+Uses **Tucker-CAM** (our novel method) which combines **P-splines** for non-linear functional modeling with **Tucker Tensor Decomposition** to compress the parameter space, enabling scalable causal discovery on thousands of variables.
 
 ## Datasets
 
@@ -10,31 +12,27 @@ This method has been validated on the following real-world benchmarks:
 
 - **Server Machine Dataset (SMD)**: Public benchmark from a large internet company for IT operations monitoring, containing multi-dimensional KPIs from server machines.
 
-The approach generalizes to any multivariate time series where anomalies manifest as changes in causal structure.
-
 ## What this does
 
 Given a baseline period (normal behavior) and test windows:
 
-1. **Learn causal graphs** using DynoTEARS (a continuous optimization method for structure learning in DBNs with **linear structural equations**)
-2. **Compare graphs** between baseline and test windows across 4 metrics:
+1. **Learn Non-Linear Causal Graphs** using **Tucker-CAM**:
+   - Models edges as **P-spline** functions (not just linear weights)
+   - Compresses the massive coefficient tensor ($d \times d \times K$) using **Tucker Decomposition** ($d \times R \times R^3$)
+   - Solves for structure via continuous optimization with acyclicity constraint
+2. **Compare Graphs** between baseline and test windows across 4 metrics:
    - **SHD** (Structural Hamming Distance): counts edge differences
    - **Frobenius norm**: measures weight magnitude changes  
    - **Spectral radius**: detects stability shifts
-   - **Max edge weight**: flags individual strong changes
-3. **Detect anomalies** when metrics exceed learned thresholds (voting ensemble)
-4. **Classify type**: spike, drift, level shift, trend change, amplitude change
-5. **Root cause analysis**: identifies which variables/edges changed
+3. **Detect anomalies** when metrics exceed learned thresholds
+4. **Root cause analysis**: traces anomalies back to source variables using the learned causal graph
 
-**Model assumption:** Linear DBN (validated R²=0.84 on Telemanom dataset). Works well for continuous sensor data with approximately linear dynamics. See [Model Validation](#model-validation-and-applicability) section b
+**Model assumption:** Smooth Non-Linear Dynamics (approximated by Splines). Assumes causal relations lie in a low-rank subspace (Tucker Rank constraint).
 
 ## Quick start
 
 ```bash
-# Run on Telemanom golden baseline + one anomaly file
-./run_end_to_end_pipeline.sh
-
-# Or manually:
+# Run manually:
 python executable/launcher.py \
     --baseline data/Golden/golden_period_dataset_mean_channel.csv \
     --test data/Anomaly/telemanom/isolated_anomaly_001_P-1_seq1.csv \
@@ -88,25 +86,20 @@ Thresholds are learned from golden baseline by fitting each metric's distributio
 executable/
 ├── final_pipeline/
 │   ├── preprocessing_no_mi.py       # Stationarity, differencing, lag selection
-│   ├── dbn_dynotears.py             # DBN structure learning (main algorithm)
+│   ├── dynotears_tucker_cam.py      # DBN structure learning (main algorithm)
 │   ├── dynotears.py                 # Core DynoTEARS optimization
 │   ├── structuremodel.py            # Neural net for structure learning
 │   ├── transformers.py              # Data transformations
 │   └── window_by_window_detection.py # Sliding window controller
-├── test/
-│   └── anomaly_detection_suite/
-│       ├── binary_detection_metrics.py    # 4-metric computation
-│       ├── anomaly_detection_suite.py     # Ensemble voting
-│       ├── anomaly_classification.py      # Type classification
-│       └── root_cause_analysis.py         # Edge importance ranking
-├── launcher.py                      # Main orchestrator
-└── causal_discovery_benchmark.py    # Performance testing
+├── experiments/                     # Parameter tuning & ablation tools
+└── launcher.py                      # Main orchestrator
 
+tests/                               # Validation and debug scripts
 config/
 ├── default.yaml                     # Hyperparameters (lambda, thresholds, etc.)
-└── config_manager.py                # Config loading
+└── hyperparameters.yaml             # Complete search space config
 
-scripts/                             # Quick runners for common tasks
+scripts/                             # Orchestrators (run_entity_pipeline.sh, benchmark_rca_smd.py)
 analysis/                            # Visualization and reporting tools
 ```
 
@@ -141,8 +134,8 @@ python executable/launcher.py \
 ### Batch processing
 
 ```bash
-# Process all Telemanom anomalies in parallel
-./run_telemanom_parallel.sh
+# Process a full SMD machine pipeline (Baseline + Bagging + Detection + Evaluation)
+./scripts/run_entity_pipeline.sh machine-1-6 50
 ```
 
 ### Window-by-window detection

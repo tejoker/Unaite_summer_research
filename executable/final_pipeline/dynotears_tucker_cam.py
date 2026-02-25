@@ -294,7 +294,7 @@ class TuckerFastCAMDAG:
 
             # Early stopping: check convergence
             # 1. DAG constraint satisfied
-            if abs(h.item()) <= h_tol:
+            if abs(h.item()) <= h_tol and iter_num > 0:
                 if verbose:
                     logger.info(f"  Iter {iter_num}: h={h.item():.2e} (DAG constraint satisfied)")
                 break
@@ -327,7 +327,8 @@ class TuckerFastCAMDAG:
     def get_structure_model(
         self,
         var_names: List[str],
-        w_threshold: float = 0.01
+        w_threshold: float = 0.01,
+        return_indices: bool = False
     ) -> List[Tuple]:
         """
         Convert learned Tucker-CAM to edge list (vectorized - no NetworkX overhead).
@@ -337,7 +338,9 @@ class TuckerFastCAMDAG:
             w_threshold: Threshold for edge pruning (keep edges with |weight| > threshold)
 
         Returns:
-            List of edges as tuples: (parent, child, {'weight': w, 'lag': l})
+            List of edges. 
+            If return_indices=False: (parent_name, child_name, {'weight': w, 'lag': l})
+            If return_indices=True: (parent_idx, child_idx, lag, weight)
         """
         if self.model is None:
             raise ValueError("Model not fitted yet. Call fit() first.")
@@ -356,11 +359,15 @@ class TuckerFastCAMDAG:
         indices_w = np.argwhere(mask_w)
         for idx in indices_w:
             i, j = idx
-            edges.append((
-                f"{var_names[j]}_lag0",  # parent
-                f"{var_names[i]}_lag0",  # child
-                {'weight': float(W_np[i, j]), 'lag': 0}
-            ))
+            if return_indices:
+                # (parent_idx, child_idx, lag, weight)
+                edges.append((j, i, 0, float(W_np[i, j])))
+            else:
+                edges.append((
+                    f"{var_names[j]}_lag0",  # parent
+                    f"{var_names[i]}_lag0",  # child
+                    {'weight': float(W_np[i, j]), 'lag': 0}
+                ))
 
         # Add lagged edges (lag 1..p) - VECTORIZED
         for lag_idx, A_lag in enumerate(A_lags):
@@ -371,13 +378,17 @@ class TuckerFastCAMDAG:
             mask_a = np.abs(A_np) > w_threshold
             # Get indices of non-zero edges
             indices_a = np.argwhere(mask_a)
+            indices_a = np.argwhere(mask_a)
             for idx in indices_a:
                 i, j = idx
-                edges.append((
-                    f"{var_names[j]}_lag{lag}",  # parent
-                    f"{var_names[i]}_lag0",      # child
-                    {'weight': float(A_np[i, j]), 'lag': lag}
-                ))
+                if return_indices:
+                    edges.append((j, i, lag, float(A_np[i, j])))
+                else:
+                    edges.append((
+                        f"{var_names[j]}_lag{lag}",  # parent
+                        f"{var_names[i]}_lag0",      # child
+                        {'weight': float(A_np[i, j]), 'lag': lag}
+                    ))
 
         return edges
 
@@ -396,7 +407,8 @@ def from_pandas_dynamic_tucker_cam(
     lr: float = 0.01,
     w_threshold: float = 0.01,
     h_tol: float = 1e-8,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    return_indices: bool = False
 ) -> List[Tuple]:
     """
     Learn DBN structure using Tucker-CAM-DAG (memory-efficient nonlinear).
@@ -469,7 +481,8 @@ def from_pandas_dynamic_tucker_cam(
     model.fit(X, Xlags, max_iter=max_iter, lr=lr, h_tol=h_tol, verbose=True)
 
     # Extract structure as edge list (NO NetworkX - massive memory savings!)
-    edges = model.get_structure_model(var_names, w_threshold=w_threshold)
+    # Pass return_indices down to get_structure_model
+    edges = model.get_structure_model(var_names, w_threshold=w_threshold, return_indices=return_indices)
 
     logger.info(f"Tucker-CAM: Found {len(edges)} edges")
 
@@ -477,15 +490,26 @@ def from_pandas_dynamic_tucker_cam(
     # Delete model and tensors explicitly
     del X, Xlags
     if hasattr(model, 'model') and model.model is not None:
-        # Delete Tucker factors and cached matrices
-        if hasattr(model.model, 'W_U1'):
-            del model.model.W_U1, model.model.W_U2, model.model.W_core
-        if hasattr(model.model, 'A_U1'):
-            del model.model.A_U1, model.model.A_U2, model.model.A_U3, model.model.A_U4, model.model.A_core
-        if hasattr(model.model, 'W_mask'):
-            del model.model.W_mask, model.model.A_mask
-        if hasattr(model.model, 'basis_matrices'):
-            del model.model.basis_matrices
+        # Get actual model if wrapped by torch.compile (which adds _orig_mod or similar)
+        # But safest is just to try/except the deletions
+        try:
+            # Check if it's an OptimizedModule (from torch.compile)
+            actual_model = model.model
+            if hasattr(actual_model, '_orig_mod'):
+                actual_model = actual_model._orig_mod
+                
+            # Delete Tucker factors and cached matrices
+            if hasattr(actual_model, 'W_U1'):
+                del actual_model.W_U1, actual_model.W_U2, actual_model.W_core
+            if hasattr(actual_model, 'A_U1'):
+                del actual_model.A_U1, actual_model.A_U2, actual_model.A_U3, actual_model.A_U4, actual_model.A_core
+            if hasattr(actual_model, 'W_mask'):
+                del actual_model.W_mask, actual_model.A_mask
+            if hasattr(actual_model, 'basis_matrices'):
+                del actual_model.basis_matrices
+        except Exception as e:
+            logger.warning(f"Error during memory cleanup (harmless): {e}")
+        
         del model.model
     del model
     

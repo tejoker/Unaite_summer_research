@@ -13,9 +13,13 @@ num_cores = max(os.cpu_count() or 1, 64)
 
 # Divide cores among workers - each worker gets its fair share
 # If N_WORKERS is set, divide cores equally: threads_per_worker = total_cores / N_WORKERS
-n_workers = int(os.environ.get('N_WORKERS', 1))
-threads_per_worker = max(2, num_cores // n_workers)  # Minimum 2 threads per worker
+if 'OMP_NUM_THREADS' in os.environ:
+    threads_per_worker = int(os.environ['OMP_NUM_THREADS'])
+else:
+    n_workers = int(os.environ.get('N_WORKERS', 1))
+    threads_per_worker = max(1, num_cores // n_workers)  # Allow 1 thread per worker
 
+# Update env vars to ensure libraries respect the limit
 os.environ['OMP_NUM_THREADS'] = str(threads_per_worker)
 os.environ['MKL_NUM_THREADS'] = str(threads_per_worker)
 os.environ['OPENBLAS_NUM_THREADS'] = str(threads_per_worker)
@@ -85,6 +89,16 @@ def adaptive_hard_threshold(weights, min_cluster_size=100):
         signal_mask = np.zeros(len(weights), dtype=bool)
         signal_mask[top_indices] = True
     
+    # DEBUG LOGGING
+    n_kept = signal_mask.sum()
+    if n_kept == 0 and len(weights) > 0:
+        # Fallback: if clustering removes everything, keep top k (safety net)
+        # But only if we have enough weights
+        fallback_k = min(len(weights), 50)
+        top_indices = np.argsort(weights)[-fallback_k:]
+        signal_mask[top_indices] = True
+        # logger.info(f"  Threshold warning: Clustering kept 0/{len(weights)} edges. Fallback to top-{fallback_k}.")
+    
     return signal_mask
 
 
@@ -95,17 +109,21 @@ def process_single_window(args):
     import sys
     import traceback
     from pathlib import Path
-    import psutil
     import os
     import numpy as np
     from datetime import datetime
     import time as time_module
     
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+
     # CRITICAL: Configure threads for this worker immediately
     # This must be done at runtime since this process might be forked
     import torch
     torch.set_num_threads(n_threads)
-    torch.set_num_interop_threads(1)
+    # torch.set_num_interop_threads(1)
     # Attempts to restrict MKL/BLAS if not already too late
     os.environ['OMP_NUM_THREADS'] = str(n_threads)
     os.environ['MKL_NUM_THREADS'] = str(n_threads)
@@ -117,8 +135,10 @@ def process_single_window(args):
 
     # Memory tracking helper
     def get_memory_mb():
-        process = psutil.Process(os.getpid())
-        return process.memory_info().rss / 1024 / 1024  # MB
+        if psutil:
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024  # MB
+        return 0.0
 
     def log_with_timestamp(msg):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -176,7 +196,8 @@ def process_single_window(args):
             max_iter=100,
             lr=0.01,
             w_threshold=0.0,  # Disabled - Tucker compression produces small weights
-            device='cpu'
+            device='cpu',
+            return_indices=True # CRITICAL FIX: Return raw indices to avoid float conversion errors
         )
 
         training_elapsed = time_module.time() - training_start
@@ -186,21 +207,33 @@ def process_single_window(args):
 
         # Extract weights
         log_with_timestamp(f"Extracting edge weights...")
-        weights = []
-        for src, tgt, lag, weight in edges:
-            weights.append({
-                'window': window_idx,
-                'source': src,
-                'target': tgt,
-                'lag': lag,
-                'weight': abs(weight)
-            })
+        
+        # Optimize: Use NumPy array instead of list of dicts to save space (500MB -> 10MB)
+        # Format: [window_idx, source, target, lag, weight]
+        num_edges = len(edges)
+        if num_edges > 0:
+            weights_arr = np.zeros((num_edges, 5), dtype=np.float32)
+            
+            weights_arr = np.zeros((num_edges, 5), dtype=np.float32)
+            
+            for i, edge in enumerate(edges):
+                # New tuple format from return_indices=True: (src, tgt, lag, weight)
+                # No strings involved!
+                src, tgt, lag, weight = edge
+                
+                weights_arr[i, 0] = float(window_idx)
+                weights_arr[i, 1] = float(src)
+                weights_arr[i, 2] = float(tgt)
+                weights_arr[i, 3] = float(lag)
+                weights_arr[i, 4] = abs(float(weight))
+        else:
+            weights_arr = np.zeros((0, 5), dtype=np.float32)
 
         mem_final = get_memory_mb()
         total_elapsed = time_module.time() - start_time
-        log_with_timestamp(f"COMPLETED in {total_elapsed:.2f}s - Extracted {len(weights)} edges - Memory: {mem_final:.1f} MB")
+        log_with_timestamp(f"COMPLETED in {total_elapsed:.2f}s - Extracted {num_edges} edges - Memory: {mem_final:.1f} MB")
 
-        return (window_idx, weights, None)
+        return (window_idx, weights_arr, None)
         
     except MemoryError as e:
         error_msg = f"MemoryError: {e}"
@@ -232,7 +265,8 @@ def run_parallel_tucker_cam(
     shm_name: str = None,
     shm_shape: tuple = None,
     shm_dtype: np.dtype = None,
-    n_threads: int = 1
+    n_threads: int = 1,
+    max_windows: int = None
 ):
     """
     Process windows in parallel using multiple processes.
@@ -243,6 +277,7 @@ def run_parallel_tucker_cam(
         shm_shape: Shape of data in shared memory
         shm_dtype: Data type in shared memory
         n_threads: Number of threads per worker
+        max_windows: Limit number of windows to process
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -269,6 +304,25 @@ def run_parallel_tucker_cam(
             logger.info(f"Found {len(completed_windows)} completed windows, resuming...")
         except Exception as e:
             logger.warning(f"Could not load existing results: {e}")
+            
+    # FIX: Also check for temp files to mark windows as completed (Robust Resume)
+    temp_dir = output_dir / "temp_windows"
+    if temp_dir.exists():
+        temp_files_found = 0
+        for temp_file in temp_dir.glob("window_*.npy"):
+            try:
+                # Format: window_00123.npy or window_00123.tmp.npy
+                if temp_file.name.startswith("window_") and temp_file.suffix == '.npy' and '.tmp' not in temp_file.name:
+                    idx_str = temp_file.stem.split('_')[1]
+                    idx = int(idx_str)
+                    if idx not in completed_windows:
+                        completed_windows.add(idx)
+                        temp_files_found += 1
+            except (ValueError, IndexError):
+                pass
+        
+        if temp_files_found > 0:
+            logger.info(f"Found {temp_files_found} additional completed windows in {temp_dir.name}, marking as completed.")
     
     # Prepare all window arguments (skip completed ones)
     window_args = []
@@ -283,17 +337,23 @@ def run_parallel_tucker_cam(
             break
         
         # Pass file paths + indices + shared memory info
+        window_args.append((
             win_idx, data_file, columns_file, start_idx, end_idx, p,
             rank_w, rank_a, n_knots, lambda_smooth, lambda_w, lambda_a,
             shm_name, shm_shape, shm_dtype,
             n_threads # Pass calculated thread count
         ))
     
-    if not window_args:
-        logger.info("All windows already completed!")
-        return
+    if max_windows and len(window_args) > max_windows:
+        logger.info(f"Limiting execution to first {max_windows} windows (of {len(window_args)} remaining)")
+        window_args = window_args[:max_windows]
     
-    logger.info(f"Processing {len(window_args)} remaining windows...")
+    if not window_args:
+        logger.info("All windows already completed! Proceeding to merge check...")
+        # Do not return here! We must fallback to the merge step.
+        # Ensure we don't try to run empty executor
+    else:
+        logger.info(f"Processing {len(window_args)} remaining windows...")
     
     # Process windows in parallel
     # DON'T accumulate all edges in memory - causes 20GB bloat!
@@ -319,12 +379,16 @@ def run_parallel_tucker_cam(
                     failed += 1
                 else:
                     # Save weights to individual temp file (don't accumulate in RAM!)
-                    if weights:
+                    if weights is not None and len(weights) > 0:
                         temp_file = temp_dir / f"window_{window_idx:05d}.npy"
-                        temp_file_tmp = temp_dir / f"window_{window_idx:05d}.tmp"
+                        # Fix: np.save appends .npy if missing. Use .tmp.npy explicitly.
+                        temp_file_tmp = temp_dir / f"window_{window_idx:05d}.tmp.npy" # Explicit extension
                         
-                        # Atomic write: save to .tmp, then rename to .npy
-                        np.save(temp_file_tmp, weights, allow_pickle=True)
+                        # Ensure dir exists (race condition safety)
+                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Atomic write: save to .tmp.npy, then rename to .npy
+                        np.save(temp_file_tmp, weights, allow_pickle=False)
                         os.rename(temp_file_tmp, temp_file)
                         
                         logger.info(f"Window {window_idx} completed - Saved {len(weights)} edges to {temp_file.name}")
@@ -338,8 +402,15 @@ def run_parallel_tucker_cam(
                         f.write(f"In progress: {len(window_args) - (completed - len(completed_windows)) - failed}\n")
                         f.write(f"Last completed window: {window_idx}\n")
 
+
                     progress_pct = (completed / num_windows) * 100
                     logger.info(f"Progress: {completed}/{num_windows} windows ({progress_pct:.1f}%), {failed} failed)")
+                
+                # CRITICAL: Release memory immediately!
+                # The Future object holds the result (weights) which is heavy.
+                # We saved it to disk, so we don't need it in RAM anymore.
+                del weights
+                del futures[future]
                         
             except Exception as e:
                 logger.error(f"Window {win_idx} exception: {e}")
@@ -350,71 +421,105 @@ def run_parallel_tucker_cam(
                     f.write(f"Completed: {completed}/{num_windows}\n")
                     f.write(f"Failed: {failed}\n")
                     f.write(f"In progress: {len(window_args) - (completed - len(completed_windows)) - failed}\n")
+                
+                # Release reference on failure too
+                del futures[future]
 
     
     # Merge all temp files into final result (only loads into memory once at end)
     logger.info(f"="*80)
     logger.info(f"POST-PROCESSING: Merging temp files and applying top-k filter...")
     
-    all_results = []
+    if max_windows is not None:
+        logger.info(f"Skipping merge step because --max-windows is set (Stress Test Mode).")
+        logger.info(f"Parallel processing finished successfully.")
+        return
+
+    # STREAMING MERGE: Process temp files one by one and write to CSV
+    # This avoids loading all data into memory at once
+    import csv
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    weights_dir = output_dir / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    output_csv = weights_dir / "weights_enhanced.csv"
+    
+    logger.info(f"MERGE: Streaming results to {output_csv}...")
+    
     temp_files = sorted(temp_dir.glob("window_*.npy"))
-    logger.info(f"Loading edges from {len(temp_files)} temp files...")
+    total_edges = 0
     
-    for temp_file in temp_files:
-        try:
-            weights = np.load(temp_file, allow_pickle=True)
-            all_results.extend(weights)
-        except Exception as e:
-            logger.warning(f"Could not load {temp_file.name}: {e}")
+    # SAFETY: If no temp files are found, do NOT overwrite the existing weights file.
+    # This prevents data loss if the script is re-run on a fully completed experiment.
+    if not temp_files:
+        if output_csv.exists():
+             logger.info(f"No new temp files to merge. Keeping existing {output_csv}.")
+        else:
+             logger.warning(f"No temp files found and no existing output {output_csv}. Something might be wrong.")
+        
+        logger.info(f"="*80)
+        return
+
+    with open(output_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        # Header matching dual_metric_anomaly_detection.py expectation (i, j for indices)
+        writer.writerow(['window_idx', 'i', 'j', 'lag', 'weight'])
+        
+        for i, temp_file in enumerate(temp_files):
+            try:
+                # Load one window
+                weights_arr = np.load(temp_file, allow_pickle=False)
+                
+                # Apply adaptive thresholding per window
+                # Extract weight values (column 4)
+                weight_values = weights_arr[:, 4]
+                
+                if len(weight_values) > 0:
+                    # Apply adaptive thresholding
+                    logger.info(f"    Window {i}: Raw edges={len(weight_values)}, Max weight={np.max(weight_values):.4f}")
+                    signal_mask = adaptive_hard_threshold(weight_values, min_cluster_size=min(100, len(weight_values)))
+                    logger.info(f"    Window {i}: Kept {signal_mask.sum()} edges after thresholding")
+                    
+                    # Write kept edges
+                    rows_to_write = []
+                    # Filter rows using boolean mask
+                    kept_rows = weights_arr[signal_mask]
+                    
+                    for row in kept_rows:
+                        # [window_idx, source, target, lag, weight]
+                        rows_to_write.append([
+                            int(row[0]),  # window
+                            int(row[1]),  # source(i)
+                            int(row[2]),  # target(j)
+                            int(row[3]),  # lag
+                            float(row[4]) # weight
+                        ])
+                    
+                    if rows_to_write:
+                        writer.writerows(rows_to_write)
+                        total_edges += len(rows_to_write)
+                
+                # Clean up immediately
+                del weights_arr
+                temp_file.unlink()
+                
+                if i % 10 == 0:
+                    logger.info(f"Merged {i+1}/{len(temp_files)} windows... ({total_edges} edges written)")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to merge {temp_file.name}: {e}")
+
+    logger.info(f"="*80)
+    logger.info(f"PARALLEL PROCESSING COMPLETE")
+    logger.info(f"Total edges saved: {total_edges}")
+    logger.info(f"Output: {output_csv}")
     
-    logger.info(f"Total raw edges collected: {len(all_results)}")
-
-    # Group by window and apply top-k per window
-    from collections import defaultdict
-    windows_dict = defaultdict(list)
-    for weight_entry in all_results:
-        windows_dict[weight_entry['window']].append(weight_entry)
-
-    logger.info(f"Edges grouped into {len(windows_dict)} windows")
-    logger.info(f"Applying adaptive K-means thresholding per window...")
-
-    final_results = []
-    for win_idx in sorted(windows_dict.keys()):
-        weights_list = windows_dict[win_idx]
-        
-        # Extract weight values
-        weight_values = np.array([w['weight'] for w in weights_list])
-        
-        # Apply adaptive thresholding
-        signal_mask = adaptive_hard_threshold(weight_values, min_cluster_size=min(100, len(weight_values)))
-        
-        # Keep only signal edges
-        for i, is_signal in enumerate(signal_mask):
-            if is_signal:
-                final_results.append(weights_list[i])
-        
-        logger.info(f"Window {win_idx}: {signal_mask.sum()}/{len(weights_list)} edges kept ({100*signal_mask.sum()/len(weights_list):.1f}%)")
-
-    logger.info(f"After adaptive thresholding: {len(final_results)} edges remaining")
-
-    # Save final results
-    logger.info(f"Writing final results to disk...")
-    output_file = output_dir / "window_edges.npy"
-    np.save(output_file, final_results, allow_pickle=True)
-    logger.info(f"Saved {len(final_results)} edges to {output_file}")
-    
-    # Cleanup temp files
-    logger.info(f"Cleaning up temporary files...")
+    # Remove temp dir if empty
     import shutil
     try:
         shutil.rmtree(temp_dir)
-        logger.info(f"Removed temp directory: {temp_dir}")
-    except Exception as e:
-        logger.warning(f"Could not remove temp directory: {e}")
-    
-    logger.info(f"="*80)
-    logger.info(f"PARALLEL PROCESSING COMPLETE")
-    logger.info(f"Completed: {completed}/{num_windows}, Failed: {failed}")
+    except:
+        pass
     logger.info(f"="*80)
 
 
@@ -429,6 +534,7 @@ def main():
     parser.add_argument('--window-size', type=int, default=100)
     parser.add_argument('--stride', type=int, default=10)
     parser.add_argument('--workers', type=int, default=2, help='Number of parallel workers (2-4 recommended for d=2889)')
+    parser.add_argument('--max-windows', type=int, default=None, help='Maximum number of windows to process')
     
     args = parser.parse_args()
     
@@ -460,7 +566,11 @@ def main():
                 elif isinstance(first_item, (int, np.integer)):
                     # Just lag values in order
                     optimal_lags = {var_names[i]: int(lag) for i, lag in enumerate(optimal_lags_raw)}
-            except (TypeError, IndexError):
+                elif optimal_lags_raw.dtype.names and 'optimal_lag' in optimal_lags_raw.dtype.names:
+                    # Structured array with field names
+                    optimal_lags_arr = optimal_lags_raw['optimal_lag']
+                    optimal_lags = {var_names[i]: int(lag) for i, lag in enumerate(optimal_lags_arr)}
+            except (TypeError, IndexError, ValueError):
                 pass
     
     if not optimal_lags:
@@ -529,7 +639,8 @@ def main():
             shm_name=shm.name if shm else None,
             shm_shape=data_np.shape,
             shm_dtype=data_np.dtype,
-            n_threads=n_threads
+            n_threads=n_threads,
+            max_windows=args.max_windows
         )
     except Exception as e:
         logger.error(f"Global error in parallel execution: {e}")

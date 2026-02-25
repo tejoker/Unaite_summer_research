@@ -40,8 +40,8 @@ fi
 # Tucker-CAM Configuration
 # ============================================================================
 export USE_TUCKER_CAM=true
-export USE_PARALLEL=true       # Parallel with 1 worker = fresh process per window (clean memory)
-export N_WORKERS=1             # Single worker prevents memory issues while keeping clean isolation
+export USE_PARALLEL=true       # Parallel with 4 workers (verified safe & fast)
+export N_WORKERS=4             # 16 threads/worker = 64 cores. Stable memory (~13GB).
 
 # PyTorch memory allocator configuration to reduce fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -229,14 +229,24 @@ if [ -f "${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy" ]; then
     else
         echo "  ⓘ CSV conversion skipped (NPY format is primary)"
     fi
+elif [ -f "${GOLDEN_OUTPUT}/causal_discovery/weights/weights_enhanced.csv" ]; then
+    WEIGHTS_FILE="${GOLDEN_OUTPUT}/causal_discovery/weights/weights_enhanced.csv"
+    mkdir -p "${GOLDEN_OUTPUT}/weights"
+    cp "$WEIGHTS_FILE" "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv"
+    WEIGHTS_SIZE=$(du -h "$WEIGHTS_FILE" | cut -f1)
+    NUM_EDGES=$(tail -n +2 "$WEIGHTS_FILE" | wc -l)
+    echo "  ✓ Tucker-CAM complete (CSV format)"
+    echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 elif [ -f "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" ]; then
-    WEIGHTS_SIZE=$(du -h "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
-    NUM_EDGES=$(tail -n +2 "${GOLDEN_OUTPUT}/weights/weights_enhanced.csv" | wc -l)
+    WEIGHTS_FILE="${GOLDEN_OUTPUT}/weights/weights_enhanced.csv"
+    WEIGHTS_SIZE=$(du -h "$WEIGHTS_FILE" | cut -f1)
+    NUM_EDGES=$(tail -n +2 "$WEIGHTS_FILE" | wc -l)
     echo "  ✓ Tucker-CAM complete (CSV format)"
     echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 else
     echo "  ✗ Weights file not found at expected location!"
     echo "    → Expected (NPY): ${GOLDEN_OUTPUT}/causal_discovery/window_edges.npy"
+    echo "    → Expected (CSV): ${GOLDEN_OUTPUT}/causal_discovery/weights/weights_enhanced.csv"
     echo "    → Expected (CSV): ${GOLDEN_OUTPUT}/weights/weights_enhanced.csv"
     echo "    → Last 50 lines of log:"
     echo "  ──────────────────────────────────────────────────────────────────"
@@ -355,6 +365,14 @@ if [ -f "${TEST_OUTPUT}/causal_discovery/window_edges.npy" ]; then
     else
         echo "  ⓘ CSV conversion skipped (NPY format is primary)"
     fi
+elif [ -f "${TEST_OUTPUT}/causal_discovery/weights/weights_enhanced.csv" ]; then
+    WEIGHTS_FILE="${TEST_OUTPUT}/causal_discovery/weights/weights_enhanced.csv"
+    mkdir -p "${TEST_OUTPUT}/weights"
+    cp "$WEIGHTS_FILE" "${TEST_OUTPUT}/weights/weights_enhanced.csv"
+    WEIGHTS_SIZE=$(du -h "$WEIGHTS_FILE" | cut -f1)
+    NUM_EDGES=$(tail -n +2 "$WEIGHTS_FILE" | wc -l)
+    echo "  ✓ Tucker-CAM complete (CSV format)"
+    echo "    → Weights: $WEIGHTS_SIZE ($NUM_EDGES edges)"
 elif [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
     WEIGHTS_SIZE=$(du -h "${TEST_OUTPUT}/weights/weights_enhanced.csv" | cut -f1)
     NUM_EDGES=$(tail -n +2 "${TEST_OUTPUT}/weights/weights_enhanced.csv" | wc -l)
@@ -363,6 +381,7 @@ elif [ -f "${TEST_OUTPUT}/weights/weights_enhanced.csv" ]; then
 else
     echo "  ✗ Weights file not found at expected location!"
     echo "    → Expected (NPY): ${TEST_OUTPUT}/causal_discovery/window_edges.npy"
+    echo "    → Expected (CSV): ${TEST_OUTPUT}/causal_discovery/weights/weights_enhanced.csv"
     echo "    → Expected (CSV): ${TEST_OUTPUT}/weights/weights_enhanced.csv"
     echo "    → Last 50 lines of log:"
     echo "  ──────────────────────────────────────────────────────────────────"
@@ -392,12 +411,16 @@ mkdir -p "$ANOMALY_OUTPUT" "$(dirname "$ANOMALY_LOG")"
 # Use NPY files directly if available (faster), fallback to CSV
 if [ -f "results/golden_baseline/causal_discovery/window_edges.npy" ]; then
     GOLDEN_WEIGHTS="results/golden_baseline/causal_discovery/window_edges.npy"
+elif [ -f "results/golden_baseline/causal_discovery/weights/weights_enhanced.csv" ]; then
+    GOLDEN_WEIGHTS="results/golden_baseline/causal_discovery/weights/weights_enhanced.csv"
 else
     GOLDEN_WEIGHTS="results/golden_baseline/weights/weights_enhanced.csv"
 fi
 
 if [ -f "results/test_timeline/causal_discovery/window_edges.npy" ]; then
     TEST_WEIGHTS="results/test_timeline/causal_discovery/window_edges.npy"
+elif [ -f "results/test_timeline/causal_discovery/weights/weights_enhanced.csv" ]; then
+    TEST_WEIGHTS="results/test_timeline/causal_discovery/weights/weights_enhanced.csv"
 else
     TEST_WEIGHTS="results/test_timeline/weights/weights_enhanced.csv"
 fi

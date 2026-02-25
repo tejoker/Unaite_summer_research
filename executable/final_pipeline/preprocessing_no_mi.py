@@ -5,13 +5,16 @@ Performs: stationarity testing, causal rolling median detrending, and lag optimi
 """
 
 import os
+print("DEBUG: Script started", flush=True)
 import sys
 import logging
 from multiprocessing import Pool, cpu_count
 import time
 
 import numpy as np
+print("DEBUG: Numpy imported", flush=True)
 import polars as pl
+print("DEBUG: Polars imported", flush=True)
 from statsmodels.tsa.stattools import adfuller, kpss
 from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.stats.diagnostic import acorr_ljungbox
@@ -211,11 +214,12 @@ def main():
     # This overhead is small compared to ADF test time
     data_dict = {col: df_detrended[col].to_numpy() for col in var_names}
     
-    with Pool(cpu_count()) as pool:
-        results = pool.map(
-            parallel_stationarity_test,
-            [(col, data_dict[col], ALPHA_STATIONARITY) for col in var_names]
-        )
+    # SEQUENTIAL EXECUTION (Safer with Polars)
+    # Multiprocessing with Polars (threaded) can cause deadlocks on Linux (fork)
+    results = [
+        parallel_stationarity_test((col, data_dict[col], ALPHA_STATIONARITY)) 
+        for col in var_names
+    ]
         
     stationary_vars = []
     for name, is_stat, _, _ in results:
@@ -276,8 +280,9 @@ def main():
             for col in stationary_vars
         ]
         
-        with Pool(cpu_count()) as pool:
-            lag_results = pool.map(find_optimal_lag_worker, args_list)
+        # SEQUENTIAL EXECUTION (Safer with Polars)
+        # Multiprocessing with Polars (threaded) can cause deadlocks on Linux (fork)
+        lag_results = [find_optimal_lag_worker(arg) for arg in args_list]
             
         # Save results
         lags_file = os.path.join(preproc_dir, f"{os.path.basename(input_file).split('.')[0]}_optimal_lags.npy")

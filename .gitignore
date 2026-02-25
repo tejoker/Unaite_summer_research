@@ -20,6 +20,8 @@ archive/
 *.h5
 *.hdf5
 *.parquet
+Unaite_research_summer_program.pdf
+mathematic_part.pdf
 !.gitkeep
 
 # Python cache files
